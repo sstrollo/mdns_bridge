@@ -160,7 +160,10 @@ calling `unregister/1`, the name is withdrawn automatically (a goodbye
 packet is sent), so nothing stays announced longer than whatever wanted
 it published. Once registered, the name resolves both reactively (a real
 mDNS query on the wire gets a real mDNS answer) and through this app's
-own classic-DNS bridge, the same as anything it learned by listening.
+own classic-DNS bridge - and a registered name is always answered from
+the registry, taking priority over anything merely overheard on the
+network for the same name (see
+[Security considerations](#security-considerations)).
 
 By default, the address must be on the same subnet as the configured
 `interface` - a sanity check, since this app's own single interface is
@@ -196,10 +199,55 @@ See `config/sys.config`:
 - `answer_ttl` - TTL cap applied to answers handed back over the bridge.
 - `query_timeout_ms` - how long to wait for an on-demand mDNS answer on a
   cache miss before replying NXDOMAIN.
+- `dns_rate_limit_per_second` - cap on classic-DNS bridge requests acted
+  on per second (`infinity` to disable); see
+  [Security considerations](#security-considerations).
 - `publish_ttl` - TTL announced for names registered via
   `mdns:register/2,3`.
 - `publish_reannounce_ms` - how often to re-announce every currently
   registered name, so caches elsewhere on the network stay fresh.
+- `cache_max_entries` - cap on distinct records learned from the
+  network; oldest entries are evicted once over it.
+
+Network interface changes
+--------------------------
+
+This app resolves the configured interface's address once, at startup,
+and does not watch for it changing (a DHCP renewal, a link up/down
+event). That's the embedding system's job - call `mdns:interface_changed/0`
+when you detect one:
+
+```erlang
+mdns:interface_changed().
+```
+
+This rejoins the mDNS multicast group on the new address if it changed,
+and revalidates future registrations against the new subnet. It does not
+touch existing registrations - re-register anything that should now be
+announced under a different address.
+
+Security considerations
+------------------------
+
+- **mDNS has no authentication.** Anything on the local network segment
+  can announce a record for any name. A registered name (via
+  `mdns:register/2,3`) is always answered from this app's own registry,
+  taking priority over anything else the network says about that name -
+  but a name this app merely *learns* by listening remains
+  trust-on-first-use, bounded by RFC 6762 cache-flush handling and
+  `cache_max_entries` rather than unbounded. Don't feed the classic-DNS
+  bridge's answers for names you don't control into anything that makes
+  security-sensitive decisions without independent verification.
+- **The classic-DNS bridge answers whoever can reach it.** `dns_bind_ip`
+  defaults to `{0,0,0,0}` (all interfaces, not just localhost). Bind it
+  to `127.0.0.1` or a trusted interface if it shouldn't be reachable
+  from the wider LAN; `dns_rate_limit_per_second` bounds how much it can
+  be used to spawn processes or trigger outbound mDNS queries either way.
+- **`mdns:register/2,3` has no authorization.** Any Erlang code running
+  on the same node can publish, or take over, any name. Don't expose the
+  node via unrestricted distributed Erlang to untrusted peers.
+- **Network changes aren't detected automatically.** See
+  [Network interface changes](#network-interface-changes) above.
 
 Contributing
 ------------
