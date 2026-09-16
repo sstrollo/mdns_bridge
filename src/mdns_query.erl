@@ -1,0 +1,78 @@
+%%%-------------------------------------------------------------------
+%% @doc Active mDNS querying: on-demand resolve/3 (blocking, callable from
+%% any process - used by the classic-DNS bridge on a cache miss) plus a
+%% periodic sweep that proactively re-queries cache entries before their
+%% TTL expires, so answers don't just silently go stale between the time
+%% someone last overheard them.
+%% @end
+%%%-------------------------------------------------------------------
+-module(mdns_query).
+
+-behaviour(gen_server).
+
+-export([child_spec/0, start_link/0, resolve/3]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
+
+-define(SERVER, ?MODULE).
+-define(REFRESH_INTERVAL_MS, 15000).
+-define(REFRESH_BEFORE_SECONDS, 20).
+
+-record(state, {}).
+
+child_spec() ->
+    #{id => ?MODULE, start => {?MODULE, start_link, []}}.
+
+start_link() ->
+    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+
+%% Resolve Name/Type, issuing an mDNS query and waiting up to TimeoutMs for
+%% an answer if it isn't already cached. Safe to call concurrently from
+%% many processes - each call waits in its own mailbox, no shared
+%% bottleneck.
+-spec resolve(string() | binary(), atom(), timeout()) ->
+    {ok, [{term(), non_neg_integer()}]} | {error, timeout}.
+resolve(Name0, Type, TimeoutMs) ->
+    Name = mdns_proto:normalize_name(Name0),
+    case mdns_cache:lookup(Name, Type) of
+        [] -> resolve_miss(Name, Type, TimeoutMs);
+        Answers -> {ok, Answers}
+    end.
+
+resolve_miss(Name, Type, TimeoutMs) ->
+    ok = mdns_cache:await_subscribe(Name, Type),
+    case mdns_cache:lookup(Name, Type) of
+        [] ->
+            mdns_socket:send_query(Name, Type),
+            Result =
+                receive
+                    {mdns_answer, Name, Type, Answers} -> {ok, Answers}
+                after TimeoutMs ->
+                    {error, timeout}
+                end,
+            mdns_cache:await_unsubscribe(Name, Type),
+            Result;
+        Answers ->
+            mdns_cache:await_unsubscribe(Name, Type),
+            {ok, Answers}
+    end.
+
+init([]) ->
+    schedule_sweep(),
+    {ok, #state{}}.
+
+handle_call(_Req, _From, State) ->
+    {reply, {error, unknown_call}, State}.
+
+handle_cast(_Msg, State) ->
+    {noreply, State}.
+
+handle_info(refresh_sweep, State) ->
+    Keys = mdns_cache:near_expiry(?REFRESH_BEFORE_SECONDS),
+    [mdns_socket:send_query(Name, Type) || {Name, Type} <- Keys],
+    schedule_sweep(),
+    {noreply, State};
+handle_info(_Msg, State) ->
+    {noreply, State}.
+
+schedule_sweep() ->
+    erlang:send_after(?REFRESH_INTERVAL_MS, self(), refresh_sweep).
