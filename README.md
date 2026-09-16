@@ -22,16 +22,23 @@ Features
   internal per-host nameserver at it, or [wire it straight into Erlang's
   own resolver](#using-this-from-erlang-directly-inet_db) with no
   external forwarder needed at all.
+- Lets Erlang code [publish names](#publishing-names) over mDNS via
+  `mdns:register/2,3` - including addresses other than the host's own
+  (announcing on another device's behalf) - with the registration tied
+  to the calling process's lifetime.
 - Built on OTP's own `inet_dns` for wire (de)coding, which already
   understands RFC 6762 (mDNS) framing - see `CONTRIBUTING.md`.
 
 Status
 ------
 
-This covers **phase 1**: learning names from mDNS traffic and serving A
-records over classic DNS. A **phase 2** - registering names via an
-Erlang API and announcing them (including addresses other than the
-host's own) over mDNS - is planned but not yet implemented.
+Both halves described above are implemented: learning/bridging (phase 1)
+and publishing (phase 2). Deliberately out of scope for now: RFC 6762
+probing and conflict resolution - registrations are announced trusting
+the caller that the name is meant to be unique, rather than probing for
+a live conflict and negotiating over it. See
+[Publishing names](#publishing-names) for what that means in practice
+and what the extension point for it will look like.
 
 Requirements
 ------------
@@ -73,12 +80,15 @@ as an mDNS peer (see `test/docker/`):
     $ docker build -t mdns-test -f test/docker/Dockerfile .
     $ docker run --rm mdns-test
 
-The container starts avahi-daemon and the app together, then runs
-`test/docker/run_e2e.sh`, which exercises: resolving the container's own
-avahi-announced hostname from the passive cache, on-demand resolution of a
-name published after the app started, NXDOMAIN for unknown `.local`
-names, an empty NOERROR answer for non-`.local` queries, cache removal
-after a goodbye/withdraw, and the `inet_db` integration described below.
+The container starts avahi-daemon and the app together (as a named,
+distributed Erlang node), then runs `test/docker/run_e2e.sh`, which
+exercises: resolving the container's own avahi-announced hostname from
+the passive cache, on-demand resolution of a name published after the
+app started, NXDOMAIN for unknown `.local` names, an empty NOERROR answer
+for non-`.local` queries, cache removal after a goodbye/withdraw, the
+`inet_db` integration described below, and `mdns:register/2,3` /
+`unregister/1` called from a separate Erlang node (the same way an
+actual client application would) publishing and then withdrawing a name.
 Exits non-zero if anything fails.
 
 See `CONTRIBUTING.md` for the full set of checks (formatting, dialyzer,
@@ -134,6 +144,47 @@ earlier version did, for names outside `.local`, and it quietly broke
 this exact setup): everything outside `.local` gets an empty NOERROR
 instead, which is what makes the fallback to your real resolver work.
 
+Publishing names
+----------------
+
+`mdns:register/2,3` announces a `.local` name over mDNS on behalf of the
+calling process:
+
+```erlang
+{ok, Ref} = mdns:register("my-service.local", {192, 168, 1, 42}),
+%% ... later, when you're done with it ...
+ok = mdns:unregister(Ref).
+```
+
+The registration is tied to the calling process: if it exits without
+calling `unregister/1`, the name is withdrawn automatically (a goodbye
+packet is sent), so nothing stays announced longer than whatever wanted
+it published. Once registered, the name resolves both reactively (a real
+mDNS query on the wire gets a real mDNS answer) and through this app's
+own classic-DNS bridge, the same as anything it learned by listening.
+
+By default, the address must be on the same subnet as the configured
+`interface` - a sanity check, since this app's own single interface is
+what it actually announces on. To publish an address that isn't (for
+example, announcing a name on behalf of some other device on the LAN
+that doesn't speak mDNS itself), pass `#{validate => false}`:
+
+```erlang
+mdns:register("other-device.local", {192, 168, 1, 99}, #{validate => false}).
+```
+
+Registering the same `{name, address}` again - from the same process or
+a different one - takes over the registration; the previous owner no
+longer affects it. This app does not implement RFC 6762 probing or
+defend a name against a conflicting claim from elsewhere on the network:
+it trusts that whatever calls `register/2,3` already knows the name is
+meant to be unique. If that ever needs to change, the natural extension
+point is a `conflict` (or similarly named) option to `register/3` with
+policies like `error` (fail if already probed as in use elsewhere),
+`force` (claim it regardless), or a rename callback - rather than the
+"just append `(2)` to the name" approach some minimal implementations
+fall back to.
+
 Configuration
 -------------
 
@@ -146,6 +197,10 @@ See `config/sys.config`:
 - `answer_ttl` - TTL cap applied to answers handed back over the bridge.
 - `query_timeout_ms` - how long to wait for an on-demand mDNS answer on a
   cache miss before replying NXDOMAIN.
+- `publish_ttl` - TTL announced for names registered via
+  `mdns:register/2,3`.
+- `publish_reannounce_ms` - how often to re-announce every currently
+  registered name, so caches elsewhere on the network stay fresh.
 
 Contributing
 ------------
