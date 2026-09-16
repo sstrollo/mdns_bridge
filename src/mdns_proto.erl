@@ -51,8 +51,14 @@ mdns_query(Name, Type) ->
 extract_answers(#dns_rec{anlist = An, arlist = Ar}) ->
     [
         {normalize_name(Domain), Type, Data, Ttl, CacheFlush}
-     || #dns_rr{domain = Domain, type = Type, class = Class, data = Data,
-                ttl = Ttl, func = CacheFlush} <- An ++ Ar,
+     || #dns_rr{
+            domain = Domain,
+            type = Type,
+            class = Class,
+            data = Data,
+            ttl = Ttl,
+            func = CacheFlush
+        } <- An ++ Ar,
         Class =:= ?CLASS_IN
     ].
 
@@ -64,7 +70,8 @@ dns_response(#dns_rec{header = ReqHeader, qdlist = Qd}, Answers, Type, Found) ->
     Rcode =
         case {Found, Answers} of
             {true, _} -> 0;
-            {false, []} -> 3; % NXDOMAIN
+            % NXDOMAIN
+            {false, []} -> 3;
             {false, _} -> 0
         end,
     RespHeader = ReqHeader#dns_header{

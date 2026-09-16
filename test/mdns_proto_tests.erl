@@ -17,12 +17,28 @@ mdns_query_test() ->
     ?assertNot(Q#dns_query.unicast_response).
 
 extract_answers_test() ->
-    RrA = #dns_rr{domain = "Widget.Local", type = a, class = in, ttl = 120,
-                  data = {10, 0, 0, 1}, func = true},
-    RrOther = #dns_rr{domain = "widget.local", type = a, class = chaos,
-                       ttl = 120, data = {10, 0, 0, 2}},
-    Rec = #dns_rec{header = #dns_header{}, qdlist = [], anlist = [RrA],
-                    nslist = [], arlist = [RrOther]},
+    RrA = #dns_rr{
+        domain = "Widget.Local",
+        type = a,
+        class = in,
+        ttl = 120,
+        data = {10, 0, 0, 1},
+        func = true
+    },
+    RrOther = #dns_rr{
+        domain = "widget.local",
+        type = a,
+        class = chaos,
+        ttl = 120,
+        data = {10, 0, 0, 2}
+    },
+    Rec = #dns_rec{
+        header = #dns_header{},
+        qdlist = [],
+        anlist = [RrA],
+        nslist = [],
+        arlist = [RrOther]
+    },
     ?assertEqual(
         [{"widget.local", a, {10, 0, 0, 1}, 120, true}],
         mdns_proto:extract_answers(Rec)
@@ -41,6 +57,27 @@ dns_response_answers_test() ->
     ?assertMatch(
         [#dns_rr{domain = "widget.local", type = a, data = {10, 0, 0, 1}, ttl = 30}],
         Resp#dns_rec.anlist
+    ).
+
+%% Guards the assumption behind mdns_dns.hrl: it vendors inet_dns's own
+%% record shapes (not published under kernel/include), so round-trip the
+%% records we build through the real inet_dns:encode/decode. If a future
+%% OTP release ever changes inet_dns's internal record layout, this is
+%% what will actually catch it.
+round_trip_mdns_query_test() ->
+    Rec = mdns_proto:mdns_query("widget.local", a),
+    Bin = inet_dns:encode(Rec, true),
+    {ok, Decoded} = inet_dns:decode(Bin, true),
+    ?assertMatch(#dns_rec{qdlist = [#dns_query{domain = "widget.local", type = a}]}, Decoded).
+
+round_trip_dns_response_test() ->
+    Req = request("widget.local", a),
+    Resp = mdns_proto:dns_response(Req, [{{10, 0, 0, 1}, 30}], a, true),
+    Bin = inet_dns:encode(Resp, false),
+    {ok, Decoded} = inet_dns:decode(Bin, false),
+    ?assertMatch(
+        [#dns_rr{domain = "widget.local", type = a, data = {10, 0, 0, 1}, ttl = 30}],
+        Decoded#dns_rec.anlist
     ).
 
 request(Name, Type) ->

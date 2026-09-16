@@ -47,5 +47,6 @@
     data = [],
     tm,
     bm = "",
-    func = false  %% cache-flush bit (mDNS, RFC 6762) when decoded with Mdns=true
+    %% cache-flush bit (mDNS, RFC 6762) when decoded with Mdns=true
+    func = false
 }).

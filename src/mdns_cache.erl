@@ -35,8 +35,13 @@
 -record(state, {}).
 
 %% Entry as produced by mdns_proto:extract_answers/1.
--type entry() :: {Name :: string(), Type :: atom(), Data :: term(),
-                   Ttl :: non_neg_integer(), CacheFlush :: boolean()}.
+-type entry() :: {
+    Name :: string(),
+    Type :: atom(),
+    Data :: term(),
+    Ttl :: non_neg_integer(),
+    CacheFlush :: boolean()
+}.
 
 child_spec() ->
     #{id => ?MODULE, start => {?MODULE, start_link, []}}.

@@ -11,8 +11,9 @@
     {ok, inet:ip4_address()} | {error, term()}.
 resolve(undefined) ->
     default_ipv4();
-resolve({A, B, C, D} = Ip)
-  when is_integer(A), is_integer(B), is_integer(C), is_integer(D) ->
+resolve({A, B, C, D} = Ip) when
+    is_integer(A), is_integer(B), is_integer(C), is_integer(D)
+->
     {ok, Ip};
 resolve(Name) when is_list(Name); is_binary(Name) ->
     IfName = unicode:characters_to_list(Name),
