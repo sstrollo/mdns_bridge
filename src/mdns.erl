@@ -8,7 +8,7 @@
 %%%-------------------------------------------------------------------
 -module(mdns).
 
--export([register/2, register/3, unregister/1]).
+-export([register/2, register/3, unregister/1, interface_changed/0]).
 
 %% @doc Equivalent to `register(Name, Ip, #{})'.
 -spec register(string() | binary(), inet:ip4_address()) ->
@@ -36,3 +36,19 @@ register(Name, Ip, Opts) ->
 -spec unregister(reference()) -> ok.
 unregister(Ref) ->
     mdns_registry:unregister(Ref).
+
+%% @doc Call this when the embedding system detects that the configured
+%% network interface's address (or netmask) changed - e.g. a DHCP
+%% renewal, a link up/down event. This app does not watch for network
+%% changes itself; detecting them is the embedder's job.
+%%
+%% Rejoins the mDNS multicast group on the new address if it changed,
+%% and revalidates future registrations against the new subnet.
+%% Existing registrations are left as they are - re-register anything
+%% that should now be announced under a different address.
+-spec interface_changed() -> ok | {error, term()}.
+interface_changed() ->
+    case mdns_socket:refresh_interface() of
+        ok -> mdns_registry:refresh_interface();
+        {error, _} = Err -> Err
+    end.

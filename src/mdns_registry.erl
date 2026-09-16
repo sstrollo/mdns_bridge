@@ -15,7 +15,15 @@
 
 -behaviour(gen_server).
 
--export([child_spec/0, start_link/0, register/2, register/3, unregister/1, answers_for/2]).
+-export([
+    child_spec/0,
+    start_link/0,
+    register/2,
+    register/3,
+    unregister/1,
+    answers_for/2,
+    refresh_interface/0
+]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 -export_type([opts/0]).
 
@@ -24,14 +32,16 @@
 -define(DEFAULT_TTL, 120).
 -define(REANNOUNCE_FOLLOWUP_MS, 1000).
 -define(DEFAULT_REANNOUNCE_INTERVAL_MS, 60000).
+-define(KNOWN_OPTS, [validate]).
 
+-define(is_octet(X), (is_integer(X) andalso X >= 0 andalso X =< 255)).
 -define(is_ipv4(Ip),
     (is_tuple(Ip) andalso
         tuple_size(Ip) =:= 4 andalso
-        is_integer(element(1, Ip)) andalso
-        is_integer(element(2, Ip)) andalso
-        is_integer(element(3, Ip)) andalso
-        is_integer(element(4, Ip)))
+        ?is_octet(element(1, Ip)) andalso
+        ?is_octet(element(2, Ip)) andalso
+        ?is_octet(element(3, Ip)) andalso
+        ?is_octet(element(4, Ip)))
 ).
 
 -record(state, {
@@ -58,7 +68,14 @@ register(Name, Ip) ->
 -spec register(string() | binary(), inet:ip4_address(), opts()) ->
     {ok, reference()} | {error, term()}.
 register(Name, Ip, Opts) when is_map(Opts) ->
-    gen_server:call(?SERVER, {register, mdns_proto:normalize_name(Name), Ip, Opts}).
+    %% Validated here, in the caller's own process: a malformed Opts must
+    %% never reach the gen_server as a bad message, since a crash there
+    %% would take mdns_registry_tab (and every other caller's live
+    %% registrations) down with it.
+    case validate_opts(Opts) of
+        ok -> gen_server:call(?SERVER, {register, mdns_proto:normalize_name(Name), Ip, Opts});
+        {error, _} = Err -> Err
+    end.
 
 -spec unregister(reference()) -> ok.
 unregister(Ref) ->
@@ -71,6 +88,14 @@ answers_for(Name, Type) ->
         {Data, Ttl}
      || [Data, Ttl] <- ets:match(?TAB, {{Name, Type, '$1'}, #{ttl => '$2'}})
     ].
+
+%% Call when the embedding system detects that the configured
+%% interface's address or netmask changed (e.g. a DHCP renewal) - this
+%% app does not watch for that itself. Revalidates future registrations
+%% against the new subnet; existing registrations are unaffected.
+-spec refresh_interface() -> ok | {error, term()}.
+refresh_interface() ->
+    gen_server:call(?SERVER, refresh_interface).
 
 init([]) ->
     IfaceConfig = application:get_env(mdns, interface, undefined),
@@ -93,6 +118,14 @@ handle_call({register, Name, Ip, Opts}, {FromPid, _Tag}, State) ->
     end;
 handle_call({unregister, Ref}, _From, State) ->
     {reply, ok, withdraw(Ref, State)};
+handle_call(refresh_interface, _From, State) ->
+    IfaceConfig = application:get_env(mdns, interface, undefined),
+    case mdns_iface:resolve_with_netmask(IfaceConfig) of
+        {ok, {IfaceIp, Netmask}} ->
+            {reply, ok, State#state{iface_ip = IfaceIp, netmask = Netmask}};
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
+    end;
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
@@ -113,6 +146,20 @@ handle_info(_Msg, State) ->
 
 %% -- internal -------------------------------------------------------------
 
+%% `validate` must be a boolean if present, and no unrecognized keys -
+%% checked in the caller's own process (see register/3) so a malformed
+%% Opts never reaches the gen_server as a message it might crash on.
+validate_opts(Opts) ->
+    case maps:keys(Opts) -- ?KNOWN_OPTS of
+        [] ->
+            case maps:get(validate, Opts, true) of
+                B when is_boolean(B) -> ok;
+                Other -> {error, {invalid_opts, #{validate => Other}}}
+            end;
+        Unknown ->
+            {error, {invalid_opts, Unknown}}
+    end.
+
 validate(_Name, Ip, _Opts, _State) when not ?is_ipv4(Ip) ->
     {error, {invalid_address, Ip}};
 validate(Name, Ip, Opts, State) ->
@@ -127,7 +174,13 @@ validate(Name, Ip, Opts, State) ->
                     case mdns_iface:same_subnet(Ip, State#state.iface_ip, State#state.netmask) of
                         true -> ok;
                         false -> {error, {address_not_on_subnet, Ip}}
-                    end
+                    end;
+                %% Defense in depth: register/3 already rejects this
+                %% before it ever gets here, but never crash the
+                %% gen_server (and thus every other caller's live
+                %% registrations) over a malformed option.
+                Other ->
+                    {error, {invalid_opts, #{validate => Other}}}
             end
     end.
 

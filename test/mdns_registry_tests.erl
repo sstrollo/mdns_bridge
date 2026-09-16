@@ -15,7 +15,11 @@ registry_test_() ->
             fun rejects_out_of_subnet_address_by_default/0,
             fun validate_false_allows_out_of_subnet_address/0,
             fun rejects_non_local_name/0,
-            fun rejects_invalid_address_shape/0
+            fun rejects_invalid_address_shape/0,
+            fun rejects_out_of_range_address/0,
+            fun rejects_non_boolean_validate_option_without_crashing/0,
+            fun rejects_unknown_option_without_crashing/0,
+            fun refresh_interface_leaves_registry_usable/0
         ]
     end}.
 
@@ -122,3 +126,40 @@ rejects_invalid_address_shape() ->
         {error, {invalid_address, _}},
         mdns_registry:register("test-bad-addr.local", not_an_ip)
     ).
+
+rejects_out_of_range_address() ->
+    %% Shape looks right (a 4-tuple of integers) but octets are out of
+    %% range - must be rejected, not silently truncated onto the wire.
+    ?assertMatch(
+        {error, {invalid_address, _}},
+        mdns_registry:register("test-bad-range.local", {999, -5, 300, 1}, #{validate => false})
+    ).
+
+%% A crashing gen_server here would destroy mdns_registry_tab and drop
+%% every other caller's live registrations too - these must fail cleanly.
+rejects_non_boolean_validate_option_without_crashing() ->
+    Pid = whereis(mdns_registry),
+    Ip = sibling_ip(5),
+    {ok, Ref} = mdns_registry:register("test-survivor.local", Ip),
+    ?assertMatch(
+        {error, {invalid_opts, _}},
+        mdns_registry:register("test-bad-opts.local", sibling_ip(6), #{validate => not_a_boolean})
+    ),
+    ?assertEqual(Pid, whereis(mdns_registry)),
+    ?assertMatch([{Ip, _Ttl}], mdns_registry:answers_for("test-survivor.local", a)),
+    ok = mdns_registry:unregister(Ref).
+
+rejects_unknown_option_without_crashing() ->
+    Pid = whereis(mdns_registry),
+    ?assertMatch(
+        {error, {invalid_opts, _}},
+        mdns_registry:register("test-bad-opts2.local", sibling_ip(7), #{typo_opt => true})
+    ),
+    ?assertEqual(Pid, whereis(mdns_registry)).
+
+refresh_interface_leaves_registry_usable() ->
+    ?assertEqual(ok, mdns_registry:refresh_interface()),
+    Ip = sibling_ip(8),
+    {ok, Ref} = mdns_registry:register("test-after-refresh.local", Ip),
+    ?assertMatch([{Ip, _Ttl}], mdns_registry:answers_for("test-after-refresh.local", a)),
+    ok = mdns_registry:unregister(Ref).

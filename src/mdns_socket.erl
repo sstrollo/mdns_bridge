@@ -12,14 +12,14 @@
 
 -include("mdns_dns.hrl").
 
--export([child_spec/0, start_link/0, send_query/2, announce/3]).
+-export([child_spec/0, start_link/0, send_query/2, announce/3, refresh_interface/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(SERVER, ?MODULE).
 -define(MDNS_GROUP, {224, 0, 0, 251}).
 -define(MDNS_PORT, 5353).
 
--record(state, {socket :: gen_udp:socket()}).
+-record(state, {socket :: gen_udp:socket(), iface_ip :: inet:ip4_address()}).
 
 child_spec() ->
     #{id => ?MODULE, start => {?MODULE, start_link, []}}.
@@ -37,6 +37,14 @@ send_query(Name, Type) ->
 announce(Name, Type, Answers) ->
     gen_server:cast(?SERVER, {announce, Name, Type, Answers}).
 
+%% Call when the embedding system detects that the configured
+%% interface's address changed (e.g. a DHCP renewal) - this app does not
+%% watch for that itself. Rejoins the multicast group on the new address
+%% if it actually changed; a no-op otherwise.
+-spec refresh_interface() -> ok | {error, term()}.
+refresh_interface() ->
+    gen_server:call(?SERVER, refresh_interface).
+
 init([]) ->
     IfaceConfig = application:get_env(mdns, interface, undefined),
     case mdns_iface:resolve(IfaceConfig) of
@@ -47,7 +55,7 @@ init([]) ->
                         "mdns_socket: joined ~p on interface ~p",
                         [?MDNS_GROUP, IfaceIp]
                     ),
-                    {ok, #state{socket = Socket}};
+                    {ok, #state{socket = Socket, iface_ip = IfaceIp}};
                 {error, Reason} ->
                     {stop, {socket_open_failed, Reason}}
             end;
@@ -68,6 +76,22 @@ open_socket(IfaceIp) ->
     ],
     gen_udp:open(?MDNS_PORT, Opts).
 
+handle_call(refresh_interface, _From, State) ->
+    IfaceConfig = application:get_env(mdns, interface, undefined),
+    case mdns_iface:resolve(IfaceConfig) of
+        {ok, NewIp} when NewIp =/= State#state.iface_ip ->
+            OldIp = State#state.iface_ip,
+            ok = inet:setopts(State#state.socket, [{drop_membership, {?MDNS_GROUP, OldIp}}]),
+            ok = inet:setopts(State#state.socket, [
+                {add_membership, {?MDNS_GROUP, NewIp}}, {multicast_if, NewIp}
+            ]),
+            logger:info("mdns_socket: interface changed ~p -> ~p", [OldIp, NewIp]),
+            {reply, ok, State#state{iface_ip = NewIp}};
+        {ok, _UnchangedIp} ->
+            {reply, ok, State};
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
+    end;
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
