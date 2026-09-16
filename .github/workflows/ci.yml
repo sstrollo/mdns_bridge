@@ -14,7 +14,7 @@ jobs:
       matrix:
         otp: ["27", "28", "29"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # rebar3 ships as a self-contained escript with precompiled .beam
       # files; BEAM's loader refuses to load ones compiled too far below
@@ -28,7 +28,7 @@ jobs:
           rebar3-version: "3.27"
 
       - name: Restore dialyzer PLT cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: _build/default/rebar3_*_plt
           key: dialyzer-plt-${{ runner.os }}-otp${{ matrix.otp }}-${{ hashFiles('rebar.config') }}
