@@ -1,0 +1,14 @@
+{application, mdns, [
+    {description, "mDNS listener/cache and .local DNS bridge"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {mdns_app, []}},
+    {applications, [
+        kernel,
+        stdlib
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, []}
+ ]}.
