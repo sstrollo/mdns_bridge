@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: OTP ${{ matrix.otp }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        otp: ["25", "26", "27", "28"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: "3.24"
+
+      - name: Restore dialyzer PLT cache
+        uses: actions/cache@v4
+        with:
+          path: _build/default/rebar3_*_plt
+          key: dialyzer-plt-${{ runner.os }}-otp${{ matrix.otp }}-${{ hashFiles('rebar.config') }}
+          restore-keys: |
+            dialyzer-plt-${{ runner.os }}-otp${{ matrix.otp }}-
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Check formatting (erlfmt)
+        run: rebar3 fmt --check
+
+      - name: Run EUnit tests
+        run: rebar3 eunit
+
+      - name: Dialyzer
+        run: rebar3 dialyzer
