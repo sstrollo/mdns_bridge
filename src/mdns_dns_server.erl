@@ -1,9 +1,9 @@
 %%%-------------------------------------------------------------------
 %% @doc Classic unicast-DNS bridge for the `.local` domain. Listens on a
-%% plain UDP port (not 53, not 5353) and answers A-record queries from
-%% mdns_cache/mdns_query - this is the socket an upstream resolver (e.g.
-%% dnsmasq, systemd-resolved, or Erlang's own inet_db - see the README)
-%% forwards `.local` queries to.
+%% plain UDP port (not 53, not 5353) and answers A/PTR/SRV/TXT queries
+%% from mdns_cache/mdns_query - this is the socket an upstream resolver
+%% (e.g. dnsmasq, systemd-resolved, or Erlang's own inet_db - see the
+%% README) forwards `.local` queries to.
 %%
 %% For anything outside `.local` we deliberately reply NOERROR with an
 %% empty answer section rather than REFUSED. That's not just politeness:
@@ -42,6 +42,10 @@
 -define(DEFAULT_QUERY_TIMEOUT_MS, 400).
 -define(DEFAULT_RATE_LIMIT_PER_SECOND, 1000).
 -define(RATE_WINDOW_MS, 1000).
+%% Record types this bridge actually understands and will actively
+%% resolve on a cache miss. Anything else (including AAAA - IPv6 isn't
+%% supported yet) falls through to the generic empty-NOERROR path below.
+-define(SUPPORTED_TYPES, [a, ptr, srv, txt]).
 
 -record(state, {
     socket :: gen_udp:socket(),
@@ -119,26 +123,27 @@ handle_query(Socket, SrcIp, SrcPort, Packet) ->
 
 build_response(Req, #dns_query{domain = Domain, type = Type}) ->
     Name = mdns_proto:normalize_name(Domain),
-    case mdns_proto:is_local(Name) andalso Type =:= a of
+    case mdns_proto:is_local(Name) andalso lists:member(Type, ?SUPPORTED_TYPES) of
         true ->
-            answer_a(Req, Name);
+            answer_record(Req, Name, Type);
         false ->
-            %% Not a `.local` A query: we have no opinion on it. NOERROR
-            %% with no answers (rather than NXDOMAIN or REFUSED) is what
-            %% lets a caller with alt_nameservers configured fall through
-            %% to a real resolver for it - see the module doc.
+            %% Not a `.local` query of a type we understand: we have no
+            %% opinion on it. NOERROR with no answers (rather than
+            %% NXDOMAIN or REFUSED) is what lets a caller with
+            %% alt_nameservers configured fall through to a real resolver
+            %% for it - see the module doc.
             mdns_proto:dns_response(Req, [], Type, true)
     end.
 
-answer_a(Req, Name) ->
+answer_record(Req, Name, Type) ->
     Timeout = application:get_env(mdns_bridge, query_timeout_ms, ?DEFAULT_QUERY_TIMEOUT_MS),
     AnswerTtlCap = application:get_env(mdns_bridge, answer_ttl, ?DEFAULT_ANSWER_TTL),
     Answers =
-        case mdns_query:resolve(Name, a, Timeout) of
+        case mdns_query:resolve(Name, Type, Timeout) of
             {ok, Found} -> [{Data, min(Ttl, AnswerTtlCap)} || {Data, Ttl} <- Found];
             {error, timeout} -> []
         end,
-    mdns_proto:dns_response(Req, Answers, a, Answers =/= []).
+    mdns_proto:dns_response(Req, Answers, Type, Answers =/= []).
 
 reply(Socket, SrcIp, SrcPort, Response) ->
     Packet = inet_dns:encode(Response, false),
