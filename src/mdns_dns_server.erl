@@ -2,7 +2,17 @@
 %% @doc Classic unicast-DNS bridge for the `.local` domain. Listens on a
 %% plain UDP port (not 53, not 5353) and answers A-record queries from
 %% mdns_cache/mdns_query - this is the socket an upstream resolver (e.g.
-%% Avassa's per-host nameserver) forwards `.local` queries to.
+%% dnsmasq, systemd-resolved, or Erlang's own inet_db - see the README)
+%% forwards `.local` queries to.
+%%
+%% For anything outside `.local` we deliberately reply NOERROR with an
+%% empty answer section rather than REFUSED. That's not just politeness:
+%% OTP's inet_res only falls back from its `nameservers` list to its
+%% `alt_nameservers` list on NXDOMAIN or on an empty-but-OK answer, never
+%% on REFUSED (see inet_res:query_nss_result/9 and res_query/5 in the
+%% kernel app). Replying REFUSED would make this server usable as a
+%% `.local`-only bridge but permanently break split-horizon setups that
+%% put it in `nameservers` and a real resolver in `alt_nameservers`.
 %%
 %% Each request is handled in its own short-lived process so a slow
 %% on-demand mDNS lookup for one query can't stall others.
@@ -16,6 +26,7 @@
 
 -export([child_spec/0, start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
+-export([build_response/2]).
 
 -define(SERVER, ?MODULE).
 -define(DEFAULT_PORT, 8053).
@@ -71,14 +82,14 @@ handle_query(Socket, SrcIp, SrcPort, Packet) ->
 
 build_response(Req, #dns_query{domain = Domain, type = Type}) ->
     Name = mdns_proto:normalize_name(Domain),
-    case is_local(Name) of
-        false ->
-            refused(Req);
-        true when Type =:= a ->
-            answer_a(Req, Name);
+    case is_local(Name) andalso Type =:= a of
         true ->
-            %% We only track A records in v1: answer NOERROR/no-data
-            %% rather than asserting the name doesn't exist at all.
+            answer_a(Req, Name);
+        false ->
+            %% Not a `.local` A query: we have no opinion on it. NOERROR
+            %% with no answers (rather than NXDOMAIN or REFUSED) is what
+            %% lets a caller with alt_nameservers configured fall through
+            %% to a real resolver for it - see the module doc.
             mdns_proto:dns_response(Req, [], Type, true)
     end.
 
@@ -91,9 +102,6 @@ answer_a(Req, Name) ->
             {error, timeout} -> []
         end,
     mdns_proto:dns_response(Req, Answers, a, Answers =/= []).
-
-refused(#dns_rec{header = Header} = Req) ->
-    Req#dns_rec{header = Header#dns_header{qr = 1, aa = 0, ra = 0, rcode = 5}}.
 
 is_local(Name) ->
     lists:suffix(?LOCAL_SUFFIX, Name) orelse Name =:= "local".

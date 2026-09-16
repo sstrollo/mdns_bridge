@@ -41,10 +41,10 @@ STATUS=$(dig @127.0.0.1 -p 8053 +noall +comment nonexistent-thing.local A | grep
 [[ "$STATUS" == "status: NXDOMAIN" ]] && OK=1 || OK=0
 check "unknown name gives NXDOMAIN (got: '$STATUS')" "$OK"
 
-echo "== test 4: a non-.local query is REFUSED =="
-STATUS2=$(dig @127.0.0.1 -p 8053 +noall +comment example.com A | grep -o 'status: [A-Z]*')
-[[ "$STATUS2" == "status: REFUSED" ]] && OK=1 || OK=0
-check "non-.local query is REFUSED (got: '$STATUS2')" "$OK"
+echo "== test 4: a non-.local query is an empty NOERROR (not REFUSED) =="
+RAW4=$(dig @127.0.0.1 -p 8053 +noall +comment example.com A)
+echo "$RAW4" | grep -q 'status: NOERROR' && echo "$RAW4" | grep -q 'ANSWER: 0' && OK=1 || OK=0
+check "non-.local query is empty NOERROR, not REFUSED (got: '$(echo "$RAW4" | grep status:)')" "$OK"
 
 echo "== test 5: withdrawing the record (goodbye) removes it from our cache =="
 kill "$PUBLISH_PID" 2>/dev/null
@@ -52,6 +52,22 @@ sleep 1
 ANSWER3=$($DIG test-widget.local A)
 [[ -z "$ANSWER3" ]] && OK=1 || OK=0
 check "test-widget.local is gone after goodbye (got: '$ANSWER3')" "$OK"
+
+echo "== test 6: inet_db can be pointed at this bridge for .local, with fallback for everything else =="
+INET_DB_OUT=$(erl -noshell -eval "
+inet_db:res_update_conf(),
+Real = inet_db:res_option(nameservers) ++ inet_db:res_option(alt_nameservers),
+inet_db:res_option(alt_nameservers, Real),
+inet_db:res_option(nameservers, [{{127,0,0,1}, 8053}]),
+inet_db:set_lookup([dns, native]),
+Own = inet:gethostbyname(\"$HOSTNAME_LOCAL\"),
+Unknown = inet:gethostbyname(\"nonexistent-blah.local\"),
+io:format(\"own=~p unknown=~p~n\", [Own, Unknown]),
+init:stop().
+" 2>&1)
+echo "$INET_DB_OUT"
+echo "$INET_DB_OUT" | grep -q "own={ok," && echo "$INET_DB_OUT" | grep -q "unknown={error,nxdomain}" && OK=1 || OK=0
+check "inet:gethostbyname/1 resolves own .local name via inet_db and NXDOMAINs an unknown one" "$OK"
 
 if [[ "$FAILED" -ne 0 ]]; then
     echo "SOME TESTS FAILED"

@@ -42,7 +42,7 @@ find_ipv4(Opts) ->
 
 %% No interface configured: pick the first "up", non-loopback interface
 %% with an IPv4 address. Convenient for ad hoc/dev use; on a real
-%% multi-homed Avassa host `interface` should be set explicitly.
+%% multi-homed host `interface` should be set explicitly.
 default_ipv4() ->
     case inet:getifaddrs() of
         {ok, IfAddrs} ->
