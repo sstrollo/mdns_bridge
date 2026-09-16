@@ -1,18 +1,45 @@
 mdns
 =====
 
-An mDNS listener/cache and `.local` DNS bridge, in Erlang.
+<!-- Update OWNER/REPO once this is pushed to GitHub. -->
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
 
-Listens to mDNS traffic on the network (both passively and by actively
-issuing its own mDNS queries), caches what it learns, and answers plain
-unicast DNS queries for the `.local` domain on a configurable port - meant
-to be the target an upstream resolver (a system DNS forwarder like
-dnsmasq or systemd-resolved, an internal per-host nameserver, or Erlang's
-own `inet_db` - see below) forwards `.local` queries to.
+An embeddable mDNS server / gateway for Erlang: it listens to mDNS
+traffic on the network, caches what it learns, and bridges `.local` name
+resolution to plain unicast DNS - so anything that can talk DNS (a system
+resolver, an internal forwarder, or Erlang's own `inet_db`) can resolve
+`.local` names without speaking mDNS itself.
 
-This covers phase 1 only: learning names and serving A records. A phase 2
-(registering and announcing arbitrary names/IPs via an Erlang API) is
-planned but not yet implemented.
+Features
+--------
+
+- Listens to mDNS multicast traffic (`224.0.0.251:5353`) and caches
+  learned A records, both passively and by actively (re-)querying, so
+  answers don't just go stale between the last time something announced
+  itself.
+- Bridges `.local` resolution to plain unicast DNS on a configurable
+  port - point a system DNS forwarder (dnsmasq, systemd-resolved) or an
+  internal per-host nameserver at it, or [wire it straight into Erlang's
+  own resolver](#using-this-from-erlang-directly-inet_db) with no
+  external forwarder needed at all.
+- Built on OTP's own `inet_dns` for wire (de)coding, which already
+  understands RFC 6762 (mDNS) framing - see `CONTRIBUTING.md`.
+
+Status
+------
+
+This covers **phase 1**: learning names from mDNS traffic and serving A
+records over classic DNS. A **phase 2** - registering names via an
+Erlang API and announcing them (including addresses other than the
+host's own) over mDNS - is planned but not yet implemented.
+
+Requirements
+------------
+
+OTP 25 or later (CI tests 25-28). The mDNS (de)coding relies on record
+shapes vendored from OTP's kernel-internal `inet_dns` module rather than
+reimplementing the wire format - see `CONTRIBUTING.md` for what that
+means if you're touching `include/mdns_dns.hrl`.
 
 Build
 -----
@@ -53,6 +80,9 @@ name published after the app started, NXDOMAIN for unknown `.local`
 names, an empty NOERROR answer for non-`.local` queries, cache removal
 after a goodbye/withdraw, and the `inet_db` integration described below.
 Exits non-zero if anything fails.
+
+See `CONTRIBUTING.md` for the full set of checks (formatting, dialyzer,
+tests) a change needs to pass - the same ones CI runs on every push.
 
 Using this from Erlang directly (`inet_db`)
 --------------------------------------------
@@ -116,3 +146,14 @@ See `config/sys.config`:
 - `answer_ttl` - TTL cap applied to answers handed back over the bridge.
 - `query_timeout_ms` - how long to wait for an on-demand mDNS answer on a
   cache miss before replying NXDOMAIN.
+
+Contributing
+------------
+
+See `CONTRIBUTING.md` for coding guidelines (formatting, dialyzer, tests)
+before opening a PR.
+
+License
+-------
+
+Apache-2.0 - see `LICENSE.md`.
