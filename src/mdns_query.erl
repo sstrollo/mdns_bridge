@@ -29,10 +29,21 @@ start_link() ->
 %% an answer if it isn't already cached. Safe to call concurrently from
 %% many processes - each call waits in its own mailbox, no shared
 %% bottleneck.
+%%
+%% A name registered via mdns:register/2,3 is always answered from
+%% mdns_registry, never from mdns_cache: we're the authority on our own
+%% published records, regardless of what else the network might be
+%% saying about that name (accidentally or otherwise).
 -spec resolve(string() | binary(), atom(), timeout()) ->
     {ok, [{term(), non_neg_integer()}]} | {error, timeout}.
 resolve(Name0, Type, TimeoutMs) ->
     Name = mdns_proto:normalize_name(Name0),
+    case mdns_registry:answers_for(Name, Type) of
+        [] -> resolve_from_cache(Name, Type, TimeoutMs);
+        Answers -> {ok, Answers}
+    end.
+
+resolve_from_cache(Name, Type, TimeoutMs) ->
     case mdns_cache:lookup(Name, Type) of
         [] -> resolve_miss(Name, Type, TimeoutMs);
         Answers -> {ok, Answers}

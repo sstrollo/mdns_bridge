@@ -5,6 +5,19 @@
 %% (lookup/2, near_expiry/1) never have to go through the gen_server -
 %% only inserts and the expiry sweep are serialized through this process.
 %%
+%% Implements RFC 6762 10.2 cache-flush semantics: an inserted record
+%% with the cache-flush bit set replaces other records for the same
+%% {Name, Type} that are more than ?FLUSH_GRACE_MS old (a short grace
+%% window, so a single flush that spans more than one packet - e.g.
+%% several round-robin A records announced together - doesn't have its
+%% own records race-delete each other). Without this, conflicting
+%% records for the same name accumulate forever and anyone on the
+%% network can add a competing answer alongside a legitimate one.
+%%
+%% Also enforces a configurable cache_max_entries: once over the cap,
+%% the oldest entries (by insertion time) are evicted to make room,
+%% bounding memory use against a noisy or adversarial network.
+%%
 %% Callers that want to be woken up when a not-yet-cached name appears
 %% (mdns_query's on-demand resolve) subscribe via await_subscribe/2 and
 %% then simply wait for a `{mdns_answer, Name, Type, Answers}` message in
@@ -31,6 +44,8 @@
 -define(TAB, mdns_cache_tab).
 -define(WAITERS, mdns_cache_waiters).
 -define(SWEEP_INTERVAL_MS, 5000).
+-define(FLUSH_GRACE_MS, 1000).
+-define(DEFAULT_MAX_ENTRIES, 10000).
 
 -record(state, {}).
 
@@ -62,7 +77,7 @@ lookup(Name, Type) ->
     Now = now_ms(),
     [
         {Data, remaining_seconds(ExpiresAt, Now)}
-     || [Data, ExpiresAt] <- ets:match(?TAB, {{Name, Type, '$1'}, '$2'}),
+     || [Data, ExpiresAt] <- ets:match(?TAB, {{Name, Type, '$1'}, {'$2', '_'}}),
         ExpiresAt > Now
     ].
 
@@ -74,7 +89,7 @@ near_expiry(WithinSeconds) ->
     Horizon = Now + WithinSeconds * 1000,
     Keys = [
         {Name, Type}
-     || [Name, Type, ExpiresAt] <- ets:match(?TAB, {{'$1', '$2', '_'}, '$3'}),
+     || [Name, Type, ExpiresAt] <- ets:match(?TAB, {{'$1', '$2', '_'}, {'$3', '_'}}),
         ExpiresAt > Now,
         ExpiresAt =< Horizon
     ],
@@ -97,8 +112,12 @@ init([]) ->
     {ok, #state{}}.
 
 handle_call({insert_many, Entries}, _From, State) ->
-    Touched = lists:usort([store_entry(E) || E <- Entries]),
+    Now = now_ms(),
+    FlushKeys = lists:usort([{Name, Type} || {Name, Type, _Data, _Ttl, true} <- Entries]),
+    [flush_stale(Key, Now) || Key <- FlushKeys],
+    Touched = lists:usort([store_entry(E, Now) || E <- Entries]),
     [notify_waiters(Name, Type) || {Name, Type} <- Touched],
+    enforce_max_entries(),
     {reply, ok, State};
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown_call}, State}.
@@ -115,13 +134,24 @@ handle_info(_Msg, State) ->
 
 %% -- internal ---------------------------------------------------------
 
-store_entry({Name, Type, Data, 0, _CacheFlush}) ->
+%% RFC 6762 10.2: a cache-flush record replaces other records for the
+%% same {Name, Type} that are "known for more than one second" - delete
+%% anything older than the grace window, leave the rest (this batch's
+%% own entries, and anything from a flush burst spread across more than
+%% one packet) alone.
+flush_stale({Name, Type}, Now) ->
+    Cutoff = Now - ?FLUSH_GRACE_MS,
+    ets:select_delete(?TAB, [
+        {{{Name, Type, '_'}, {'_', '$1'}}, [{'<', '$1', Cutoff}], [true]}
+    ]).
+
+store_entry({Name, Type, Data, 0, _CacheFlush}, _Now) ->
     %% mDNS goodbye packet: TTL=0 means "remove this record now".
     ets:delete(?TAB, {Name, Type, Data}),
     {Name, Type};
-store_entry({Name, Type, Data, Ttl, _CacheFlush}) ->
-    ExpiresAt = now_ms() + Ttl * 1000,
-    ets:insert(?TAB, {{Name, Type, Data}, ExpiresAt}),
+store_entry({Name, Type, Data, Ttl, _CacheFlush}, Now) ->
+    ExpiresAt = Now + Ttl * 1000,
+    ets:insert(?TAB, {{Name, Type, Data}, {ExpiresAt, Now}}),
     {Name, Type}.
 
 notify_waiters(Name, Type) ->
@@ -136,7 +166,31 @@ notify_waiters(Name, Type) ->
 
 expire_rows() ->
     Now = now_ms(),
-    ets:select_delete(?TAB, [{{'_', '$1'}, [{'=<', '$1', Now}], [true]}]).
+    ets:select_delete(?TAB, [{{'_', {'$1', '_'}}, [{'=<', '$1', Now}], [true]}]).
+
+%% Oldest-InsertedAt-first eviction once over the configured cap. Only
+%% runs when actually over the cap, so the full table scan is fine even
+%% though it isn't the cheapest possible eviction strategy.
+enforce_max_entries() ->
+    MaxEntries = application:get_env(mdns, cache_max_entries, ?DEFAULT_MAX_ENTRIES),
+    Size = ets:info(?TAB, size),
+    case Size - MaxEntries of
+        Excess when Excess > 0 ->
+            evict_oldest(Excess);
+        _ ->
+            ok
+    end.
+
+evict_oldest(N) ->
+    Rows = ets:tab2list(?TAB),
+    Sorted = lists:sort(
+        fun({_, {_, InsertedAt1}}, {_, {_, InsertedAt2}}) ->
+            InsertedAt1 =< InsertedAt2
+        end,
+        Rows
+    ),
+    [ets:delete(?TAB, Key) || {Key, _Value} <- lists:sublist(Sorted, N)],
+    ok.
 
 now_ms() ->
     erlang:monotonic_time(millisecond).
