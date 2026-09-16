@@ -46,7 +46,7 @@ refresh_interface() ->
     gen_server:call(?SERVER, refresh_interface).
 
 init([]) ->
-    IfaceConfig = application:get_env(mdns, interface, undefined),
+    IfaceConfig = application:get_env(mdns_bridge, interface, undefined),
     case mdns_iface:resolve(IfaceConfig) of
         {ok, IfaceIp} ->
             case open_socket(IfaceIp) of
@@ -77,7 +77,7 @@ open_socket(IfaceIp) ->
     gen_udp:open(?MDNS_PORT, Opts).
 
 handle_call(refresh_interface, _From, State) ->
-    IfaceConfig = application:get_env(mdns, interface, undefined),
+    IfaceConfig = application:get_env(mdns_bridge, interface, undefined),
     case mdns_iface:resolve(IfaceConfig) of
         {ok, NewIp} when NewIp =/= State#state.iface_ip ->
             OldIp = State#state.iface_ip,

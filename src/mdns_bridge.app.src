@@ -1,4 +1,4 @@
-{application, mdns, [
+{application, mdns_bridge, [
     {description, "mDNS listener/cache and .local DNS bridge"},
     {vsn, "0.1.0"},
     {registered, []},
@@ -10,5 +10,5 @@
     {env, []},
     {modules, []},
     {licenses, ["Apache-2.0"]},
-    {links, [{"GitHub", "https://github.com/sstrollo/mdns"}]}
+    {links, [{"GitHub", "https://github.com/sstrollo/mdns_bridge"}]}
  ]}.

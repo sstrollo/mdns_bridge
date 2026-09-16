@@ -172,7 +172,7 @@ expire_rows() ->
 %% runs when actually over the cap, so the full table scan is fine even
 %% though it isn't the cheapest possible eviction strategy.
 enforce_max_entries() ->
-    MaxEntries = application:get_env(mdns, cache_max_entries, ?DEFAULT_MAX_ENTRIES),
+    MaxEntries = application:get_env(mdns_bridge, cache_max_entries, ?DEFAULT_MAX_ENTRIES),
     Size = ets:info(?TAB, size),
     case Size - MaxEntries of
         Excess when Excess > 0 ->

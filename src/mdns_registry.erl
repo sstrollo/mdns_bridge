@@ -98,7 +98,7 @@ refresh_interface() ->
     gen_server:call(?SERVER, refresh_interface).
 
 init([]) ->
-    IfaceConfig = application:get_env(mdns, interface, undefined),
+    IfaceConfig = application:get_env(mdns_bridge, interface, undefined),
     case mdns_iface:resolve_with_netmask(IfaceConfig) of
         {ok, {IfaceIp, Netmask}} ->
             ets:new(?TAB, [set, public, named_table]),
@@ -119,7 +119,7 @@ handle_call({register, Name, Ip, Opts}, {FromPid, _Tag}, State) ->
 handle_call({unregister, Ref}, _From, State) ->
     {reply, ok, withdraw(Ref, State)};
 handle_call(refresh_interface, _From, State) ->
-    IfaceConfig = application:get_env(mdns, interface, undefined),
+    IfaceConfig = application:get_env(mdns_bridge, interface, undefined),
     case mdns_iface:resolve_with_netmask(IfaceConfig) of
         {ok, {IfaceIp, Netmask}} ->
             {reply, ok, State#state{iface_ip = IfaceIp, netmask = Netmask}};
@@ -188,7 +188,7 @@ do_register(Name, Ip, FromPid, State) ->
     Key = {Name, a, Ip},
     Monitors0 = demonitor_previous_owner(Key, State#state.monitors),
     Ref = erlang:monitor(process, FromPid),
-    Ttl = application:get_env(mdns, publish_ttl, ?DEFAULT_TTL),
+    Ttl = application:get_env(mdns_bridge, publish_ttl, ?DEFAULT_TTL),
     ets:insert(?TAB, {Key, #{ref => Ref, pid => FromPid, ttl => Ttl}}),
     mdns_socket:announce(Name, a, [{Ip, Ttl}]),
     erlang:send_after(?REANNOUNCE_FOLLOWUP_MS, self(), {reannounce_one, Key}),
@@ -233,5 +233,7 @@ reannounce({Name, Type, Data} = Key) ->
     end.
 
 schedule_reannounce_all() ->
-    Interval = application:get_env(mdns, publish_reannounce_ms, ?DEFAULT_REANNOUNCE_INTERVAL_MS),
+    Interval = application:get_env(
+        mdns_bridge, publish_reannounce_ms, ?DEFAULT_REANNOUNCE_INTERVAL_MS
+    ),
     erlang:send_after(Interval, self(), reannounce_all).

@@ -35,12 +35,12 @@ stop(Pid) ->
     gen_server:stop(Pid).
 
 start_with_small_cap() ->
-    application:set_env(mdns, cache_max_entries, 3),
+    application:set_env(mdns_bridge, cache_max_entries, 3),
     start().
 
 stop_and_restore_cap(Pid) ->
     stop(Pid),
-    application:unset_env(mdns, cache_max_entries).
+    application:unset_env(mdns_bridge, cache_max_entries).
 
 insert_and_lookup() ->
     ok = mdns_cache:insert_many([{"a.local", a, {10, 0, 0, 1}, 120, false}]),

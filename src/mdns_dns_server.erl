@@ -56,10 +56,10 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 init([]) ->
-    Port = application:get_env(mdns, dns_port, ?DEFAULT_PORT),
-    BindIp = application:get_env(mdns, dns_bind_ip, ?DEFAULT_BIND_IP),
+    Port = application:get_env(mdns_bridge, dns_port, ?DEFAULT_PORT),
+    BindIp = application:get_env(mdns_bridge, dns_bind_ip, ?DEFAULT_BIND_IP),
     RateLimit = application:get_env(
-        mdns, dns_rate_limit_per_second, ?DEFAULT_RATE_LIMIT_PER_SECOND
+        mdns_bridge, dns_rate_limit_per_second, ?DEFAULT_RATE_LIMIT_PER_SECOND
     ),
     Opts = [binary, {active, true}, {reuseaddr, true}, {ip, BindIp}],
     case gen_udp:open(Port, Opts) of
@@ -131,8 +131,8 @@ build_response(Req, #dns_query{domain = Domain, type = Type}) ->
     end.
 
 answer_a(Req, Name) ->
-    Timeout = application:get_env(mdns, query_timeout_ms, ?DEFAULT_QUERY_TIMEOUT_MS),
-    AnswerTtlCap = application:get_env(mdns, answer_ttl, ?DEFAULT_ANSWER_TTL),
+    Timeout = application:get_env(mdns_bridge, query_timeout_ms, ?DEFAULT_QUERY_TIMEOUT_MS),
+    AnswerTtlCap = application:get_env(mdns_bridge, answer_ttl, ?DEFAULT_ANSWER_TTL),
     Answers =
         case mdns_query:resolve(Name, a, Timeout) of
             {ok, Found} -> [{Data, min(Ttl, AnswerTtlCap)} || {Data, Ttl} <- Found];

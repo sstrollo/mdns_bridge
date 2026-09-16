@@ -11,9 +11,9 @@ avahi-daemon --daemonize --no-chroot
 grep -q "$(hostname)" /etc/hosts || echo "127.0.0.1 $(hostname)" >>/etc/hosts
 
 cd /app
-erl -noshell -sname mdnsapp -setcookie mdnstest -pa _build/default/lib/mdns/ebin \
+erl -noshell -sname mdnsapp -setcookie mdnstest -pa _build/default/lib/mdns_bridge/ebin \
     -config config/sys \
-    -eval 'application:ensure_all_started(mdns), timer:sleep(infinity).' &
+    -eval 'application:ensure_all_started(mdns_bridge), timer:sleep(infinity).' &
 MDNS_PID=$!
 
 # Give the app a moment to join the multicast group and open the bridge port.

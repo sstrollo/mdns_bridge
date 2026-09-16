@@ -1,4 +1,4 @@
-# Self-contained end-to-end test environment for the mdns app: a real
+# Self-contained end-to-end test environment for the mdns_bridge app: a real
 # avahi-daemon (a genuine mDNS peer) plus dig, running alongside the app
 # itself, so the .local bridge can be exercised the same way `dig` would
 # be used against it in production.
