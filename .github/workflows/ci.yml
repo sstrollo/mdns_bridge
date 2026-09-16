@@ -16,10 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # rebar3 ships as a self-contained escript with precompiled .beam
+      # files; BEAM's loader refuses to load ones compiled too far below
+      # the running OTP version. Keep this reasonably current (bump when
+      # bumping the OTP matrix above) rather than pinned to an old
+      # release, or it'll eventually fail to even start on a new OTP
+      # major - which is exactly what happened with 3.24 on OTP 29.
       - uses: erlef/setup-beam@v1
         with:
           otp-version: ${{ matrix.otp }}
-          rebar3-version: "3.24"
+          rebar3-version: "3.27"
 
       - name: Restore dialyzer PLT cache
         uses: actions/cache@v4
