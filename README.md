@@ -42,10 +42,22 @@ and what the extension point for it will look like.
 Requirements
 ------------
 
-OTP 25 or later (CI tests 25-28). The mDNS (de)coding relies on record
-shapes vendored from OTP's kernel-internal `inet_dns` module rather than
-reimplementing the wire format - see `CONTRIBUTING.md` for what that
-means if you're touching `include/mdns_dns.hrl`.
+**OTP 27 or later** (CI tests 27-29). This is a hard requirement, not
+just what's tested: `inet_dns:encode/2` and `decode/2` - the two-argument
+forms that let a caller choose mDNS (`Mdns=true`) vs. classic
+(`Mdns=false`) framing, which this app relies on throughout, both for
+mDNS traffic and for the classic-DNS bridge - were only added to
+`inet_dns`'s exported API in OTP 27. Earlier versions only export
+`encode/1`/`decode/1`, which are hardcoded to `Mdns=true` internally with
+no supported way to ask for classic framing instead - so the classic-DNS
+bridge specifically cannot work correctly on OTP <27 via the public API.
+(Confirmed by CI: `mdns_proto_tests`'s `inet_dns` round-trip tests fail
+with `undef` on OTP 25/26, exactly as expected.)
+
+The mDNS (de)coding also relies on record shapes vendored from OTP's
+kernel-internal `inet_dns` module rather than reimplementing the wire
+format - see `CONTRIBUTING.md` for what that means if you're touching
+`include/mdns_dns.hrl`.
 
 Build
 -----
