@@ -10,12 +10,15 @@
 
 -export([
     normalize_name/1,
+    is_local/1,
     mdns_query/2,
+    mdns_answer/3,
     extract_answers/1,
     dns_response/4
 ]).
 
 -define(CLASS_IN, in).
+-define(LOCAL_SUFFIX, ".local").
 
 %% DNS names are case-insensitive; normalize for use as cache keys.
 -spec normalize_name(string() | binary()) -> string().
@@ -30,6 +33,11 @@ strip_trailing_dot(Name) ->
         _ -> Name
     end.
 
+%% Name must already be normalize_name/1'd.
+-spec is_local(string()) -> boolean().
+is_local(Name) ->
+    lists:suffix(?LOCAL_SUFFIX, Name) orelse Name =:= "local".
+
 %% Build an mDNS question packet (as a #dns_rec{}) asking for Type records
 %% of Name. Plain (non-QU) question: we want the multicast answer, and it's
 %% fine (and useful) if others on the link overhear it too.
@@ -43,6 +51,21 @@ mdns_query(Name, Type) ->
         unicast_response = false
     },
     #dns_rec{header = Header, qdlist = [Query], anlist = [], nslist = [], arlist = []}.
+
+%% Build an unsolicited mDNS answer/announcement (as a #dns_rec{}) for a
+%% name we're publishing: an announce, a reactive answer to a matching
+%% question, or (with Ttl=0) a goodbye. Per RFC 6762 section 6, multicast
+%% responses conventionally omit the question section, and every answer
+%% carries the cache-flush bit since we're the authority on our own
+%% published records.
+-spec mdns_answer(string(), atom(), [{term(), non_neg_integer()}]) -> #dns_rec{}.
+mdns_answer(Name, Type, Answers) ->
+    Header = #dns_header{id = 0, qr = 1, opcode = 0, aa = 1},
+    AnList = [
+        #dns_rr{domain = Name, type = Type, class = ?CLASS_IN, ttl = Ttl, data = Data, func = true}
+     || {Data, Ttl} <- Answers
+    ],
+    #dns_rec{header = Header, qdlist = [], anlist = AnList, nslist = [], arlist = []}.
 
 %% Pull out {Name, Type, Data, Ttl, CacheFlush} tuples for every answer
 %% (answer + additional section) we're prepared to cache: class IN only.

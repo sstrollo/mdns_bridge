@@ -10,6 +10,33 @@ normalize_name_test_() ->
         ?_assertEqual("foo.local", mdns_proto:normalize_name(<<"FOO.LOCAL">>))
     ].
 
+is_local_test_() ->
+    [
+        ?_assert(mdns_proto:is_local("foo.local")),
+        ?_assert(mdns_proto:is_local("local")),
+        ?_assertNot(mdns_proto:is_local("example.com")),
+        ?_assertNot(mdns_proto:is_local("notlocal"))
+    ].
+
+mdns_answer_test() ->
+    Rec = mdns_proto:mdns_answer("widget.local", a, [{{10, 0, 0, 1}, 120}]),
+    ?assertEqual(1, (Rec#dns_rec.header)#dns_header.qr),
+    ?assertEqual(1, (Rec#dns_rec.header)#dns_header.aa),
+    ?assertEqual([], Rec#dns_rec.qdlist),
+    ?assertMatch(
+        [#dns_rr{domain = "widget.local", type = a, data = {10, 0, 0, 1}, ttl = 120, func = true}],
+        Rec#dns_rec.anlist
+    ).
+
+round_trip_mdns_answer_test() ->
+    Rec = mdns_proto:mdns_answer("widget.local", a, [{{10, 0, 0, 1}, 120}]),
+    Bin = inet_dns:encode(Rec, true),
+    {ok, Decoded} = inet_dns:decode(Bin, true),
+    ?assertMatch(
+        [#dns_rr{domain = "widget.local", type = a, data = {10, 0, 0, 1}, func = true}],
+        Decoded#dns_rec.anlist
+    ).
+
 mdns_query_test() ->
     Rec = mdns_proto:mdns_query("widget.local", a),
     ?assertMatch(#dns_rec{qdlist = [#dns_query{domain = "widget.local", type = a}]}, Rec),

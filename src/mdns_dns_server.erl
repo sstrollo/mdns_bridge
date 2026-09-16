@@ -33,7 +33,6 @@
 -define(DEFAULT_BIND_IP, {0, 0, 0, 0}).
 -define(DEFAULT_ANSWER_TTL, 30).
 -define(DEFAULT_QUERY_TIMEOUT_MS, 400).
--define(LOCAL_SUFFIX, ".local").
 
 -record(state, {socket :: gen_udp:socket()}).
 
@@ -82,7 +81,7 @@ handle_query(Socket, SrcIp, SrcPort, Packet) ->
 
 build_response(Req, #dns_query{domain = Domain, type = Type}) ->
     Name = mdns_proto:normalize_name(Domain),
-    case is_local(Name) andalso Type =:= a of
+    case mdns_proto:is_local(Name) andalso Type =:= a of
         true ->
             answer_a(Req, Name);
         false ->
@@ -102,9 +101,6 @@ answer_a(Req, Name) ->
             {error, timeout} -> []
         end,
     mdns_proto:dns_response(Req, Answers, a, Answers =/= []).
-
-is_local(Name) ->
-    lists:suffix(?LOCAL_SUFFIX, Name) orelse Name =:= "local".
 
 reply(Socket, SrcIp, SrcPort, Response) ->
     Packet = inet_dns:encode(Response, false),
