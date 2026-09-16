@@ -24,6 +24,7 @@ registry_test_() ->
             fun rejects_non_boolean_validate_option_without_crashing/0,
             fun rejects_non_boolean_probe_option/0,
             fun rejects_invalid_on_conflict_option/0,
+            fun accepts_auto_on_conflict_option/0,
             fun rejects_unknown_option_without_crashing/0,
             fun refresh_interface_leaves_registry_usable/0,
             fun ongoing_conflict_is_defended_once_then_given_up/0,
@@ -178,6 +179,15 @@ rejects_invalid_on_conflict_option() ->
             probe => false, on_conflict => {rename, fun(_) -> ok end}
         })
     ).
+
+%% No conflict occurs here (probe => false), so this only exercises opts
+%% validation accepting `auto` - see mdns_registry_probe_tests for `auto`
+%% actually resolving a conflict.
+accepts_auto_on_conflict_option() ->
+    {ok, Ref, _} = mdns_registry:register("test-auto-opt.local", sibling_ip(31), #{
+        probe => false, on_conflict => auto
+    }),
+    ok = mdns_registry:unregister(Ref).
 
 rejects_unknown_option_without_crashing() ->
     Pid = whereis(mdns_registry),

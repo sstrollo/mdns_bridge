@@ -176,7 +176,7 @@ probe queries, 250ms apart, so this call typically takes at least
 ~750ms) before claiming the name, and keeps defending it against a
 conflicting claim for as long as it's registered (RFC 6762 section 9).
 `FinalName` is the name actually claimed - normally the same as what you
-passed, but see `{rename, Fun}` below for when it isn't.
+passed, but see `auto`/`{rename, Fun}` below for when it isn't.
 
 The registration is tied to the calling process: if it exits without
 calling `unregister/1`, the name is withdrawn automatically (a goodbye
@@ -214,23 +214,42 @@ during the initial probe and later while the name is held:
   `{mdns_bridge_conflict, Ref, Name}`.
 - `force` - claim the name regardless of a probe conflict, and never give
   it up on an ongoing one - always keep reasserting it instead.
-- `{rename, Fun}` - probe time only: call `Fun(Name, Attempt)` (1-based
-  `Attempt`) for a new name to try instead, and probe that one, up to
+- `auto` - probe time only: on a conflict, retry as `"<name>-<attempt>"`
+  (inserted before the `.local` suffix, so `printer.local` becomes
+  `printer-1.local`, not the invalid `printer.local-1`), up to
   `max_rename_attempts` (default 10) tries:
 
   ```erlang
-  Fun = fun(Name, Attempt) -> Name ++ "-" ++ integer_to_list(Attempt) end,
-  mdns:register("printer.local", Ip, #{on_conflict => {rename, Fun}}).
+  mdns:register("printer.local", Ip, #{on_conflict => auto}).
   %% -> {ok, Ref, "printer-1.local"} if "printer.local" was taken but
   %%    "printer-1.local" wasn't - deliberately not the "just append (2)
-  %%    forever" approach some minimal implementations fall back to;
-  %%    Fun decides the naming scheme.
+  %%    forever, no rhyme or reason" approach some minimal implementations
+  %%    fall back to.
   ```
 
-  An ongoing conflict on a `{rename, Fun}` registration behaves like
-  `error` (withdraw + notify) - it doesn't automatically re-probe and
-  rename on its own while running; react to `{mdns_bridge_conflict, Ref,
-  Name}` and call `register/2,3` again if you want that.
+- `{rename, Fun}` - like `auto`, but you supply the naming scheme: probe
+  time only, calls `Fun(OriginalName, Attempt)` (always the *original*
+  name passed to `register/2,3`, 1-based `Attempt`) for a new name to
+  try, and probes that one, up to `max_rename_attempts` tries. `Fun` is
+  responsible for returning something that's still a valid `.local` name
+  itself - `auto` is equivalent to:
+
+  ```erlang
+  fun(Name, Attempt) ->
+      Base =
+          case lists:suffix(".local", Name) of
+              true -> lists:sublist(Name, length(Name) - length(".local"));
+              false -> Name
+          end,
+      Base ++ "-" ++ integer_to_list(Attempt) ++ ".local"
+  end
+  ```
+
+Both `auto` and `{rename, Fun}` behave like `error` (withdraw + notify)
+for an *ongoing* conflict on an already-claimed name - neither
+automatically re-probes and renames while running; react to
+`{mdns_bridge_conflict, Ref, Name}` and call `register/2,3` again if you
+want that.
 
 To skip probing entirely and claim a name immediately (today's original
 "trust the caller" behavior, no ~750ms wait), pass `#{probe => false}` -
@@ -272,8 +291,8 @@ See `config/sys.config`:
   registered name, so caches elsewhere on the network stay fresh.
 - `cache_max_entries` - cap on distinct records learned from the
   network; oldest entries are evicted once over it.
-- `max_rename_attempts` - cap on retries for `on_conflict => {rename,
-  Fun}` before giving up with `{error, {name_conflict, _, _}}`.
+- `max_rename_attempts` - cap on retries for `on_conflict => auto` or
+  `{rename, Fun}` before giving up with `{error, {name_conflict, _, _}}`.
 
 Network interface changes
 --------------------------

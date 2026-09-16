@@ -13,7 +13,9 @@ probe_test_() ->
             {timeout, 10, fun probes_and_claims_an_uncontested_name/0},
             {timeout, 10, fun conflict_fails_registration_by_default/0},
             {timeout, 10, fun force_claims_despite_conflict/0},
-            {timeout, 20, fun rename_retries_under_a_new_name_until_uncontested/0}
+            {timeout, 20, fun rename_retries_under_a_new_name_until_uncontested/0},
+            {timeout, 10, fun auto_is_shorthand_for_appending_the_attempt_number/0},
+            {timeout, 20, fun rename_does_not_compound_across_repeated_conflicts/0}
         ]
     end}.
 
@@ -112,4 +114,26 @@ rename_retries_under_a_new_name_until_uncontested() ->
     ?assertEqual("probe-rename-1.local", FinalName),
     ?assertMatch([{Ip, _}], mdns_registry:answers_for(FinalName, a)),
     ?assertEqual([], mdns_registry:answers_for("probe-rename.local", a)),
+    ok = mdns:unregister(Ref).
+
+auto_is_shorthand_for_appending_the_attempt_number() ->
+    Ip = sibling_ip(27),
+    Other = sibling_ip(28),
+    spawn_conflicting_responder("probe-auto.local", a, Other),
+    {ok, Ref, FinalName} = mdns:register("probe-auto.local", Ip, #{on_conflict => auto}),
+    ?assertEqual("probe-auto-1.local", FinalName),
+    ?assertMatch([{Ip, _}], mdns_registry:answers_for(FinalName, a)),
+    ok = mdns:unregister(Ref).
+
+%% A second conflict must rename from the *original* name again
+%% ("probe-compound-2.local"), not from the previous candidate
+%% ("probe-compound-1.local-2") - see mdns_registry's handle_probe_conflict.
+rename_does_not_compound_across_repeated_conflicts() ->
+    Ip = sibling_ip(29),
+    Other = sibling_ip(30),
+    spawn_conflicting_responder("probe-compound.local", a, Other),
+    spawn_conflicting_responder("probe-compound-1.local", a, Other),
+    {ok, Ref, FinalName} = mdns:register("probe-compound.local", Ip, #{on_conflict => auto}),
+    ?assertEqual("probe-compound-2.local", FinalName),
+    ?assertMatch([{Ip, _}], mdns_registry:answers_for(FinalName, a)),
     ok = mdns:unregister(Ref).

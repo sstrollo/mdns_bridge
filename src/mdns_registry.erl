@@ -33,9 +33,12 @@
 %%
 %% What a detected conflict (probe-time or ongoing) actually does is the
 %% `on_conflict` option to register/2,3: `error` (fail/withdraw - the
-%% default), `force` (claim/keep it regardless), or `{rename, Fun}`
-%% (probe-time only: call `Fun(Name, Attempt)` for a new name and retry,
-%% up to max_rename_attempts).
+%% default), `force` (claim/keep it regardless), `{rename, Fun}`
+%% (probe-time only: call `Fun(OriginalName, Attempt)` for a new name and
+%% retry, up to max_rename_attempts - always the *original* name, not the
+%% previous attempt's, so a plain `Name ++ "-" ++ integer_to_list(Attempt)`
+%% Fun produces "foo-1", "foo-2", ... rather than compounding into
+%% "foo-1-2-3"), or `auto` (shorthand for exactly that Fun).
 %% @end
 %%%-------------------------------------------------------------------
 -module(mdns_registry).
@@ -94,7 +97,10 @@
 }).
 
 -type on_conflict() ::
-    error | force | {rename, fun((string(), pos_integer()) -> string() | binary())}.
+    error
+    | force
+    | auto
+    | {rename, fun((string(), pos_integer()) -> string() | binary())}.
 -type opts() :: #{validate => boolean(), probe => boolean(), on_conflict => on_conflict()}.
 
 child_spec() ->
@@ -116,8 +122,11 @@ register(Name, Ip, Opts) when is_map(Opts) ->
     %% would take mdns_registry_tab (and every other caller's live
     %% registrations) down with it.
     case validate_opts(Opts) of
-        ok -> attempt_register(mdns_proto:normalize_name(Name), Ip, Opts, 1);
-        {error, _} = Err -> Err
+        ok ->
+            NormName = mdns_proto:normalize_name(Name),
+            attempt_register(NormName, NormName, Ip, Opts, 1);
+        {error, _} = Err ->
+            Err
     end.
 
 -spec unregister(reference()) -> ok.
@@ -199,39 +208,69 @@ handle_info(_Msg, State) ->
 
 %% -- register/2,3's probing + rename loop (runs in the caller's process) --
 
-attempt_register(Name, Ip, Opts, Attempt) ->
-    case gen_server:call(?SERVER, {precheck, Name, Ip, Opts}) of
+attempt_register(OriginalName, CandidateName, Ip, Opts, Attempt) ->
+    case gen_server:call(?SERVER, {precheck, CandidateName, Ip, Opts}) of
         {error, _} = Err ->
             Err;
         ok ->
             case maps:get(probe, Opts, true) of
                 false ->
-                    commit(Name, Ip, Opts);
+                    commit(CandidateName, Ip, Opts);
                 true ->
                     Ttl = application:get_env(mdns_bridge, publish_ttl, ?DEFAULT_TTL),
-                    case probe(Name, a, Ip, Ttl) of
-                        no_conflict -> commit(Name, Ip, Opts);
-                        {conflict, Reason} -> handle_probe_conflict(Name, Ip, Opts, Attempt, Reason)
+                    case probe(CandidateName, a, Ip, Ttl) of
+                        no_conflict ->
+                            commit(CandidateName, Ip, Opts);
+                        {conflict, Reason} ->
+                            handle_probe_conflict(
+                                OriginalName, CandidateName, Ip, Opts, Attempt, Reason
+                            )
                     end
             end
     end.
 
-handle_probe_conflict(Name, Ip, Opts, Attempt, Reason) ->
-    MaxAttempts = application:get_env(
-        mdns_bridge, max_rename_attempts, ?DEFAULT_MAX_RENAME_ATTEMPTS
-    ),
-    case maps:get(on_conflict, Opts, error) of
+handle_probe_conflict(OriginalName, CandidateName, Ip, Opts, Attempt, Reason) ->
+    case resolve_on_conflict(maps:get(on_conflict, Opts, error)) of
         error ->
-            {error, {name_conflict, Name, Reason}};
+            {error, {name_conflict, CandidateName, Reason}};
         force ->
-            commit(Name, Ip, Opts);
-        {rename, Fun} when Attempt < MaxAttempts ->
-            case rename_via(Fun, Name, Attempt) of
-                {ok, NewName} -> attempt_register(NewName, Ip, Opts, Attempt + 1);
-                {error, _} = Err -> Err
-            end;
-        {rename, _Fun} ->
-            {error, {name_conflict, Name, Reason}}
+            commit(CandidateName, Ip, Opts);
+        {rename, Fun} ->
+            MaxAttempts = application:get_env(
+                mdns_bridge, max_rename_attempts, ?DEFAULT_MAX_RENAME_ATTEMPTS
+            ),
+            case Attempt < MaxAttempts of
+                true ->
+                    %% Always rename from the *original* name, not the
+                    %% last-tried candidate - so a plain "append -Attempt"
+                    %% Fun produces foo-1, foo-2, ... rather than
+                    %% compounding into foo-1-2-3.
+                    case rename_via(Fun, OriginalName, Attempt) of
+                        {ok, NewName} ->
+                            attempt_register(OriginalName, NewName, Ip, Opts, Attempt + 1);
+                        {error, _} = Err ->
+                            Err
+                    end;
+                false ->
+                    {error, {name_conflict, CandidateName, Reason}}
+            end
+    end.
+
+%% `auto` is shorthand for the rename scheme documented in the README:
+%% append "-Attempt" to the name - before the `.local` suffix, not after
+%% it, since "foo.local-1" isn't a `.local` name at all and would just
+%% fail the next precheck.
+resolve_on_conflict(auto) -> {rename, fun default_rename_fun/2};
+resolve_on_conflict(OnConflict) -> OnConflict.
+
+default_rename_fun(Name, Attempt) ->
+    {Base, Suffix} = split_local_suffix(Name),
+    Base ++ "-" ++ integer_to_list(Attempt) ++ Suffix.
+
+split_local_suffix(Name) ->
+    case lists:suffix(".local", Name) of
+        true -> {lists:sublist(Name, length(Name) - length(".local")), ".local"};
+        false -> {Name, ""}
     end.
 
 rename_via(Fun, Name, Attempt) ->
@@ -289,8 +328,8 @@ flush_probe_messages(Name, Type) ->
 %% -- internal -------------------------------------------------------------
 
 %% `validate` and `probe` must be booleans if present; `on_conflict` must
-%% be `error`, `force`, or `{rename, Fun}` with Fun a 2-arity fun; no
-%% unrecognized keys.
+%% be `error`, `force`, `auto`, or `{rename, Fun}` with Fun a 2-arity
+%% fun; no unrecognized keys.
 validate_opts(Opts) ->
     case maps:keys(Opts) -- ?KNOWN_OPTS of
         [] -> validate_opt_values(Opts);
@@ -316,6 +355,7 @@ is_valid_bool_opt(Key, Opts) ->
 
 validate_on_conflict(error) -> ok;
 validate_on_conflict(force) -> ok;
+validate_on_conflict(auto) -> ok;
 validate_on_conflict({rename, Fun}) when is_function(Fun, 2) -> ok;
 validate_on_conflict(Other) -> {error, {invalid_opts, #{on_conflict => Other}}}.
 

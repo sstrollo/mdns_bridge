@@ -36,14 +36,17 @@ register(Name, Ip) ->
 %% probe time and later while the name is held (RFC 6762 section 9):
 %%   - `error' (the default) - fail the registration / withdraw it.
 %%   - `force' - claim/keep the name regardless of the conflict.
-%%   - `{rename, Fun}' - probe time only: call `Fun(Name, Attempt)' for
-%%     a new name to try instead, up to the configured
-%%     `max_rename_attempts' (default 10). `Fun' receives the name that
-%%     just conflicted and the 1-based attempt number, and returns the
-%%     next name to try - e.g. `fun(N, Attempt) -> N ++ "-" ++
-%%     integer_to_list(Attempt) end' (applied to the *original* domain
-%%     part, not accumulated, since Name here is always whatever `Fun'
-%%     itself last returned).
+%%   - `{rename, Fun}' - probe time only: call `Fun(OriginalName, Attempt)'
+%%     for a new name to try instead, up to the configured
+%%     `max_rename_attempts' (default 10). `Fun' always receives the
+%%     *original* name passed to register/2,3 (not the previous attempt's
+%%     name) and the 1-based attempt number, and returns the next name to
+%%     try - so a simple `fun(N, Attempt) -> N ++ "-" ++
+%%     integer_to_list(Attempt) end' produces "foo-1", "foo-2", ... rather
+%%     than compounding into "foo-1-2-3".
+%%   - `auto' - shorthand for exactly that Fun (inserted before the
+%%     `.local' suffix, so "foo.local" becomes "foo-1.local", not the
+%%     invalid "foo.local-1").
 %%
 %% Returns `{ok, Ref, FinalName}' on success - `FinalName' is the name
 %% actually claimed, which can differ from `Name' if `{rename, Fun}'
