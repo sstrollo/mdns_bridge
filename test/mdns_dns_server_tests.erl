@@ -24,3 +24,12 @@ request(Name, Type) ->
         header = #dns_header{id = 7, rd = true},
         qdlist = [#dns_query{domain = Name, type = Type, class = in}]
     }.
+
+should_accept_test_() ->
+    [
+        ?_assert(mdns_dns_server:should_accept(infinity, 999999999)),
+        ?_assert(mdns_dns_server:should_accept(5, 0)),
+        ?_assert(mdns_dns_server:should_accept(5, 4)),
+        ?_assertNot(mdns_dns_server:should_accept(5, 5)),
+        ?_assertNot(mdns_dns_server:should_accept(5, 6))
+    ].
