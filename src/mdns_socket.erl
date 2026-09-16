@@ -106,6 +106,13 @@ open_socket(IfaceIp) ->
         binary,
         {active, true},
         {reuseaddr, true},
+        %% Without this, binding 5353 fails with eaddrinuse on any host
+        %% that already runs its own mDNS responder on the same port -
+        %% notably macOS's built-in mDNSResponder (Bonjour), which itself
+        %% binds with SO_REUSEPORT specifically so other mDNS-aware
+        %% processes can coexist with it. Not supported on Windows - not
+        %% a target platform for this app.
+        {reuseport, true},
         {ip, {0, 0, 0, 0}},
         {add_membership, {?MDNS_GROUP, IfaceIp}},
         {multicast_if, IfaceIp},

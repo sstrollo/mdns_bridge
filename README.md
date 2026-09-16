@@ -80,6 +80,12 @@ configured in `config/sys.config` (`interface`; defaults to auto-picking
 the first non-loopback IPv4 interface) and starts the `.local` DNS bridge
 on the configured `dns_port` (default `8053`).
 
+No special privileges needed - 5353 isn't a privileged port. On a host
+that already runs its own mDNS responder on 5353 (notably macOS's
+built-in `mDNSResponder`/Bonjour), the socket binds with `SO_REUSEPORT`
+specifically so it can coexist rather than fail with `eaddrinuse` - this
+app runs *alongside* the OS's own mDNS, not instead of it.
+
 Try it:
 
     $ dig @127.0.0.1 -p 8053 some-device.local A
