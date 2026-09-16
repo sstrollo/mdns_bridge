@@ -90,6 +90,32 @@ Try it:
 
     $ dig @127.0.0.1 -p 8053 some-device.local A
 
+Inspecting the cache
+--------------------
+
+`mdns_cache:dump/0` returns every current, unexpired entry as a list of
+maps (`#{name, type, data, ttl_remaining, age}`); `mdns_cache:print/0`
+formats that to stdout - handy from `rebar3 shell`:
+
+    1> mdns_cache:print().
+    my-printer.local                         a      ttl=118    age=2      {192,168,1,42}
+    _http._tcp.local                         ptr    ttl=4498   age=2      "my printer._http._tcp.local"
+    2 entries
+
+Cache inserts, removals (goodbye packets, RFC 6762 10.2 cache-flush
+evictions, natural TTL expiry, and `cache_max_entries` cap evictions) all
+log at `debug` level. OTP's default primary log level (`notice`) filters
+these - and this app's own one-off `info` messages - out; raise it to see
+them, e.g. from the shell:
+
+    1> logger:set_primary_config(level, debug).
+
+or persistently via `sys.config`:
+
+```erlang
+{kernel, [{logger_level, debug}]}
+```
+
 Test
 ----
 

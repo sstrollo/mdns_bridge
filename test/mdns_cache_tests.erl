@@ -8,7 +8,8 @@ cache_test_() ->
             fun insert_and_lookup/0,
             fun goodbye_removes_entry/0,
             fun near_expiry_reports_soon_to_expire/0,
-            fun subscriber_is_notified_on_insert/0
+            fun subscriber_is_notified_on_insert/0,
+            fun dump_reports_current_entries/0
         ]
     end}.
 
@@ -66,6 +67,13 @@ subscriber_is_notified_on_insert() ->
     after 1000 ->
         ?assert(false)
     end.
+
+dump_reports_current_entries() ->
+    ok = mdns_cache:insert_many([{"h.local", a, {10, 0, 0, 5}, 120, false}]),
+    ?assertMatch(
+        [#{name := "h.local", type := a, data := {10, 0, 0, 5}, ttl_remaining := _, age := _}],
+        [E || #{name := "h.local"} = E <- mdns_cache:dump()]
+    ).
 
 cache_flush_removes_stale_conflicting_entry() ->
     ok = mdns_cache:insert_many([{"e.local", a, {10, 0, 0, 10}, 120, false}]),

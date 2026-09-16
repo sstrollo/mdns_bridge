@@ -36,7 +36,9 @@
     lookup/2,
     near_expiry/1,
     await_subscribe/2,
-    await_unsubscribe/2
+    await_unsubscribe/2,
+    dump/0,
+    print/0
 ]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
@@ -105,6 +107,50 @@ await_unsubscribe(Name, Type) ->
     ets:delete_object(?WAITERS, {{Name, Type}, self()}),
     ok.
 
+%% Direct ETS read: every current, unexpired entry - for inspecting the
+%% cache from a shell (`rebar3 shell`) or a debug script. See print/0 for
+%% a version that just formats this to stdout.
+-spec dump() ->
+    [
+        #{
+            name := string(),
+            type := atom(),
+            data := term(),
+            ttl_remaining := non_neg_integer(),
+            age := non_neg_integer()
+        }
+    ].
+dump() ->
+    Now = now_ms(),
+    [
+        #{
+            name => Name,
+            type => Type,
+            data => Data,
+            ttl_remaining => remaining_seconds(ExpiresAt, Now),
+            age => (Now - InsertedAt) div 1000
+        }
+     || {{Name, Type, Data}, {ExpiresAt, InsertedAt}} <- ets:tab2list(?TAB),
+        ExpiresAt > Now
+    ].
+
+%% Prints dump/0's result to stdout, one line per entry, sorted by
+%% {Name, Type} for readability.
+-spec print() -> ok.
+print() ->
+    Entries = lists:sort(
+        fun(#{name := N1, type := T1}, #{name := N2, type := T2}) ->
+            {N1, T1} =< {N2, T2}
+        end,
+        dump()
+    ),
+    [
+        io:format("~-40s ~-6w ttl=~-6w age=~-6w ~p~n", [Name, Type, Ttl, Age, Data])
+     || #{name := Name, type := Type, data := Data, ttl_remaining := Ttl, age := Age} <-
+            Entries
+    ],
+    io:format("~p entries~n", [length(Entries)]).
+
 init([]) ->
     ets:new(?TAB, [set, public, named_table, {read_concurrency, true}]),
     ets:new(?WAITERS, [bag, public, named_table]),
@@ -141,17 +187,34 @@ handle_info(_Msg, State) ->
 %% one packet) alone.
 flush_stale({Name, Type}, Now) ->
     Cutoff = Now - ?FLUSH_GRACE_MS,
-    ets:select_delete(?TAB, [
-        {{{Name, Type, '_'}, {'_', '$1'}}, [{'<', '$1', Cutoff}], [true]}
-    ]).
+    case
+        ets:select_delete(?TAB, [
+            {{{Name, Type, '_'}, {'_', '$1'}}, [{'<', '$1', Cutoff}], [true]}
+        ])
+    of
+        0 ->
+            ok;
+        Count ->
+            logger:debug("mdns_cache: cache-flush removed ~p stale entr(ies) for ~p/~p", [
+                Count, Name, Type
+            ])
+    end.
 
 store_entry({Name, Type, Data, 0, _CacheFlush}, _Now) ->
     %% mDNS goodbye packet: TTL=0 means "remove this record now".
-    ets:delete(?TAB, {Name, Type, Data}),
+    case ets:take(?TAB, {Name, Type, Data}) of
+        [] ->
+            ok;
+        [_] ->
+            logger:debug("mdns_cache: removed (goodbye) ~p/~p ~p", [Name, Type, Data])
+    end,
     {Name, Type};
 store_entry({Name, Type, Data, Ttl, _CacheFlush}, Now) ->
     ExpiresAt = Now + Ttl * 1000,
+    IsNew = ets:lookup(?TAB, {Name, Type, Data}) =:= [],
     ets:insert(?TAB, {{Name, Type, Data}, {ExpiresAt, Now}}),
+    IsNew andalso
+        logger:debug("mdns_cache: added ~p/~p ~p (ttl=~p)", [Name, Type, Data, Ttl]),
     {Name, Type}.
 
 notify_waiters(Name, Type) ->
@@ -166,7 +229,10 @@ notify_waiters(Name, Type) ->
 
 expire_rows() ->
     Now = now_ms(),
-    ets:select_delete(?TAB, [{{'_', {'$1', '_'}}, [{'=<', '$1', Now}], [true]}]).
+    case ets:select_delete(?TAB, [{{'_', {'$1', '_'}}, [{'=<', '$1', Now}], [true]}]) of
+        0 -> ok;
+        Count -> logger:debug("mdns_cache: expired ~p entr(ies) (natural TTL)", [Count])
+    end.
 
 %% Oldest-InsertedAt-first eviction once over the configured cap. Only
 %% runs when actually over the cap, so the full table scan is fine even
@@ -189,7 +255,11 @@ evict_oldest(N) ->
         end,
         Rows
     ),
-    [ets:delete(?TAB, Key) || {Key, _Value} <- lists:sublist(Sorted, N)],
+    ToEvict = lists:sublist(Sorted, N),
+    [ets:delete(?TAB, Key) || {Key, _Value} <- ToEvict],
+    logger:debug("mdns_cache: evicted ~p oldest entr(ies) (over cache_max_entries): ~p", [
+        N, [Key || {Key, _Value} <- ToEvict]
+    ]),
     ok.
 
 now_ms() ->
