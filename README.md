@@ -27,19 +27,23 @@ Features
   to the calling process's lifetime. Probes for a conflict before
   claiming a name and defends it for as long as it's held (RFC 6762
   sections 8 and 9), with a pluggable policy for what to do about one.
+- Lets Erlang code [publish DNS-SD services](#publishing-services-dns-sd)
+  (RFC 6763) via `mdns:register_service/5,6` - a PTR + SRV + TXT record
+  set for a service instance (e.g. `_http._tcp`), under the same
+  process-lifetime and conflict-handling model as `register/2,3`.
 - Built on OTP's own `inet_dns` for wire (de)coding, which already
   understands RFC 6762 (mDNS) framing - see `CONTRIBUTING.md`.
 
 Status
 ------
 
-Learning/bridging (phase 1) and publishing (phase 2, including probing,
-conflict policies, and ongoing conflict defense) are implemented. The one
-deliberate simplification: RFC 6762 8.2's simultaneous-probe tie-breaking
-(two hosts probing the identical name at the identical instant, resolved
-by a lexicographic comparison) is treated as a plain conflict rather than
-implementing the actual tie-break comparison - see
-[Publishing names](#publishing-names).
+Learning/bridging (phase 1), publishing (phase 2, including probing,
+conflict policies, and ongoing conflict defense), and DNS-SD service
+publishing (RFC 6763) are implemented. The one deliberate simplification:
+RFC 6762 8.2's simultaneous-probe tie-breaking (two hosts probing the
+identical name at the identical instant, resolved by a lexicographic
+comparison) is treated as a plain conflict rather than implementing the
+actual tie-break comparison - see [Publishing names](#publishing-names).
 
 Requirements
 ------------
@@ -270,6 +274,58 @@ give up, since there's no way to tell "an outside squatter" from "our
 own other registration" apart from the data already being one of our own
 values.
 
+Publishing services (DNS-SD)
+-----------------------------
+
+`mdns:register_service/5,6` publishes an RFC 6763 DNS-SD service
+instance - a PTR + SRV + TXT record set, atomically, under one
+reference:
+
+```erlang
+{ok, Ref, FinalName} = mdns:register_service(
+    "My Printer", "_http._tcp", 8080, [{"path", "/"}], "printer-host.local"
+),
+%% FinalName = "my printer._http._tcp.local"
+%% ... later ...
+ok = mdns:unregister(Ref).
+```
+
+- `InstanceName` is free-form human-readable text (e.g. `"My Printer"`) -
+  it does not need to be a valid DNS label itself, and does not need to
+  be unique across service types. It's escaped and lower-cased into a
+  DNS label to build the full instance name (display casing isn't
+  preserved - a known simplification).
+- `ServiceType` is `"_<app-protocol>._tcp"` or `"_<app-protocol>._udp"`
+  (e.g. `"_http._tcp"`).
+- `Port` is the service's TCP/UDP port.
+- `TxtKVs` is a list of `{Key, Value}` pairs (encoded as `"Key=Value"`)
+  and/or plain strings/binaries (a boolean-style key with no value); `[]`
+  publishes an empty TXT record.
+- `TargetHost` is the `.local` hostname the service runs on. It does
+  **not** need to already be registered via `mdns:register/2,3`, or be on
+  this node's subnet at all - any `.local` name is accepted, e.g. one
+  owned by another device entirely, or the same one this app already
+  publishes an A record for.
+
+Same `probe`/`on_conflict` options as `register/3` (no `validate` -
+there's no address here to sanity-check), applied to the *instance name*.
+With the default `probe => true`, a conflict is checked by probing the
+SRV and TXT records (sequentially, not as one combined probe) before
+claiming them; nothing is committed until both clear. The PTR records -
+both the per-service-type enumeration PTR (`ServiceType.local` ->
+instance) and the meta-enumeration PTR (`_services._dns-sd._udp.local`
+-> `ServiceType.local`) - are never probed and never treated as a
+conflict: RFC 6763 defines them as *shared* records, where many different
+instances (or, for the meta-PTR, many different service types)
+legitimately coexist under the same name at once. For `on_conflict =>
+auto` or `{rename, Fun}`, `Fun` operates on the plain instance name/label
+(e.g. `"My Printer"`), not the full dotted DNS name.
+
+`unregister/1` withdraws the SRV, TXT, and this instance's PTR together.
+The service-type-level meta-enumeration PTR is reference-counted across
+every live registration of that `ServiceType` from anywhere in the
+embedding application, and is only withdrawn once none remain.
+
 Configuration
 -------------
 
@@ -287,6 +343,10 @@ See `config/sys.config`:
   [Security considerations](#security-considerations).
 - `publish_ttl` - TTL announced for names registered via
   `mdns:register/2,3`.
+- `service_ttl` - TTL announced for SRV/TXT/PTR records registered via
+  `mdns:register_service/5,6` (RFC 6763 recommends a much longer TTL
+  than a plain host's A record, since service records change far less
+  often).
 - `publish_reannounce_ms` - how often to re-announce every currently
   registered name, so caches elsewhere on the network stay fresh.
 - `cache_max_entries` - cap on distinct records learned from the

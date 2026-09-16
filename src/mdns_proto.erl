@@ -16,7 +16,11 @@
     probe_query/4,
     extract_answers/1,
     extract_watched_records/1,
-    dns_response/4
+    dns_response/4,
+    escape_label/1,
+    service_type_name/1,
+    service_instance_name/2,
+    build_txt_data/1
 ]).
 
 -define(CLASS_IN, in).
@@ -110,6 +114,56 @@ extract_records(RRs) ->
         } <- RRs,
         Class =:= ?CLASS_IN
     ].
+
+%% Escape a single DNS label's content per RFC 1035 presentation format -
+%% also what inet_dns's own name encoder/decoder expects (see
+%% inet_dns:name2labels/1): a literal "\" becomes "\\", a literal "."
+%% becomes "\.". Needed for DNS-SD service instance names (RFC 6763
+%% 4.1.3), which are free-form human-readable text and may contain
+%% either - unescaped, a "." would be misread as a label separator when
+%% the full name is built and handed to inet_dns.
+-spec escape_label(string() | binary()) -> string().
+escape_label(Label) when is_binary(Label) ->
+    escape_label(unicode:characters_to_list(Label));
+escape_label(Label) when is_list(Label) ->
+    lists:append([escape_char(C) || C <- Label]).
+
+escape_char($\\) -> "\\\\";
+escape_char($.) -> "\\.";
+escape_char(C) -> [C].
+
+%% The DNS-SD service type name for ServiceType (e.g. "_http._tcp"),
+%% e.g. "_http._tcp.local".
+-spec service_type_name(string() | binary()) -> string().
+service_type_name(ServiceType) ->
+    normalize_name(to_list(ServiceType) ++ ?LOCAL_SUFFIX).
+
+%% The full DNS-SD service instance name for InstanceName under
+%% ServiceType, e.g. service_instance_name("My Printer", "_http._tcp")
+%% -> "my printer._http._tcp.local". InstanceName is escape_label/1'd
+%% first, then - like every other name in this app - the whole result is
+%% normalize_name/1'd, which lowercases it: display casing isn't
+%% preserved, a known simplification (see the README).
+-spec service_instance_name(string() | binary(), string() | binary()) -> string().
+service_instance_name(InstanceName, ServiceType) ->
+    normalize_name(escape_label(InstanceName) ++ "." ++ service_type_name(ServiceType)).
+
+%% The list-of-strings wire representation for a TXT record, from a list
+%% of {Key, Value} pairs (encoded as "Key=Value") and/or plain
+%% strings/binaries (used as-is, for a boolean-style key with no value -
+%% RFC 6763 6.4). An empty list becomes a single empty string - RFC 6763
+%% 6.1 requires at least one string, even to represent "no data".
+-spec build_txt_data([{iodata(), iodata()} | iodata()]) -> [string()].
+build_txt_data([]) ->
+    [""];
+build_txt_data(KVs) ->
+    [txt_entry(KV) || KV <- KVs].
+
+txt_entry({Key, Value}) -> to_list(Key) ++ "=" ++ to_list(Value);
+txt_entry(Plain) -> to_list(Plain).
+
+to_list(S) when is_binary(S) -> unicode:characters_to_list(S);
+to_list(S) when is_list(S) -> S.
 
 %% Build a classic unicast-DNS response for the bridge server.
 %% Answers :: [{Data, Ttl}] for the queried Name/Type.

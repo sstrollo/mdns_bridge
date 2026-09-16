@@ -13,7 +13,14 @@
 %%%-------------------------------------------------------------------
 -module(mdns).
 
--export([register/2, register/3, unregister/1, interface_changed/0]).
+-export([
+    register/2,
+    register/3,
+    register_service/5,
+    register_service/6,
+    unregister/1,
+    interface_changed/0
+]).
 
 %% @doc Equivalent to `register(Name, Ip, #{})'.
 -spec register(string() | binary(), inet:ip4_address()) ->
@@ -62,10 +69,71 @@ register(Name, Ip) ->
 register(Name, Ip, Opts) ->
     mdns_registry:register(Name, Ip, Opts).
 
-%% @doc Withdraw a name registered with register/2,3. Idempotent - a
-%% reference that's already gone (unregistered, its owner already
-%% exited, or ongoing conflict defense already gave it up) is not an
-%% error.
+%% @doc Equivalent to `register_service(InstanceName, ServiceType, Port,
+%% TxtKVs, TargetHost, #{})'.
+-spec register_service(
+    string() | binary(),
+    string() | binary(),
+    non_neg_integer(),
+    [{iodata(), iodata()} | iodata()],
+    string() | binary()
+) -> {ok, reference(), string()} | {error, term()}.
+register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost) ->
+    mdns_registry:register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost).
+
+%% @doc Publish a DNS-SD (RFC 6763) service instance over mDNS: a
+%% PTR + SRV + TXT record set, atomically, under one reference.
+%%
+%% `InstanceName' is free-form human-readable text (e.g. "My Printer") -
+%% it does not need to be a valid DNS label itself, and is not required
+%% to be unique across service types. `ServiceType' is
+%% "_<app-protocol>._tcp" or "_<app-protocol>._udp" (e.g. "_http._tcp").
+%% `Port' is the service's TCP/UDP port. `TxtKVs' is a list of
+%% `{Key, Value}' pairs (encoded as `"Key=Value"') and/or plain
+%% strings/binaries (a boolean-style key with no value); `[]' publishes
+%% an empty TXT record.
+%%
+%% `TargetHost' is the `.local' hostname the service runs on - it does
+%% *not* need to already be registered via register/2,3 (or be on this
+%% node's subnet at all): any `.local' name is accepted, e.g. one owned
+%% by another device entirely, or the same one this app already
+%% publishes an A record for.
+%%
+%% Same `probe'/`on_conflict' options as register/3 (no `validate' -
+%% there's no address here to sanity-check), applied to the service
+%% *instance name*: with the default `probe => true', conflicts are
+%% checked by probing the SRV and TXT records (sequentially, not as one
+%% combined probe - see mdns_registry's module doc) before claiming
+%% them; the PTR (service type -> instance) is never probed, since
+%% multiple instances of one service type sharing that record is the
+%% normal, expected case, not a conflict. For `on_conflict => auto' or
+%% `{rename, Fun}', `Fun' operates on the plain instance name/label
+%% (e.g. "My Printer"), not the full dotted DNS name.
+%%
+%% Returns `{ok, Ref, FinalInstanceName}' - `FinalInstanceName' is the
+%% full `<instance>.<type>.local' name actually claimed. `Ref' behaves
+%% exactly like register/3's: pass it to unregister/1, and it's what a
+%% later `{mdns_bridge_conflict, Ref, FinalInstanceName}' message would
+%% reference. Unregistering it withdraws the SRV, TXT, and this
+%% instance's PTR together; the service-type-level meta-enumeration PTR
+%% (`_services._dns-sd._udp.local') is reference-counted and only
+%% withdrawn once no other live registration of the same `ServiceType'
+%% remains.
+-spec register_service(
+    string() | binary(),
+    string() | binary(),
+    non_neg_integer(),
+    [{iodata(), iodata()} | iodata()],
+    string() | binary(),
+    mdns_registry:service_opts()
+) -> {ok, reference(), string()} | {error, term()}.
+register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost, Opts) ->
+    mdns_registry:register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost, Opts).
+
+%% @doc Withdraw a name registered with register/2,3 or
+%% register_service/5,6. Idempotent - a reference that's already gone
+%% (unregistered, its owner already exited, or ongoing conflict defense
+%% already gave it up) is not an error.
 -spec unregister(reference()) -> ok.
 unregister(Ref) ->
     mdns_registry:unregister(Ref).

@@ -112,3 +112,50 @@ request(Name, Type) ->
         header = #dns_header{id = 42, rd = true},
         qdlist = [#dns_query{domain = Name, type = Type, class = in}]
     }.
+
+escape_label_test_() ->
+    [
+        ?_assertEqual("plain", mdns_proto:escape_label("plain")),
+        ?_assertEqual("my\\.printer", mdns_proto:escape_label("my.printer")),
+        ?_assertEqual("back\\\\slash", mdns_proto:escape_label("back\\slash")),
+        ?_assertEqual(
+            "both\\\\and\\.dot", mdns_proto:escape_label("both\\and.dot")
+        )
+    ].
+
+service_type_name_test() ->
+    ?assertEqual("_http._tcp.local", mdns_proto:service_type_name("_http._tcp")).
+
+service_instance_name_test_() ->
+    [
+        ?_assertEqual(
+            "my printer._http._tcp.local",
+            mdns_proto:service_instance_name("My Printer", "_http._tcp")
+        ),
+        ?_assertEqual(
+            "my\\.printer._http._tcp.local",
+            mdns_proto:service_instance_name("My.Printer", "_http._tcp")
+        )
+    ].
+
+%% Round-trip a service instance name containing a literal "." through
+%% the real inet_dns encoder/decoder - the whole reason escape_label/1
+%% exists is to survive exactly this, not just look right as a string.
+round_trip_escaped_instance_name_test() ->
+    Name = mdns_proto:service_instance_name("3.5\" Drive", "_http._tcp"),
+    Rec = mdns_proto:mdns_answer(Name, ptr, [{"target.local", 4500}]),
+    Bin = inet_dns:encode(Rec, true),
+    {ok, Decoded} = inet_dns:decode(Bin, true),
+    ?assertMatch([#dns_rr{domain = Name}], Decoded#dns_rec.anlist).
+
+build_txt_data_test_() ->
+    [
+        ?_assertEqual([""], mdns_proto:build_txt_data([])),
+        ?_assertEqual(["path=/"], mdns_proto:build_txt_data([{"path", "/"}])),
+        ?_assertEqual(
+            ["path=/", "flag"], mdns_proto:build_txt_data([{"path", "/"}, "flag"])
+        ),
+        ?_assertEqual(
+            ["a=1"], mdns_proto:build_txt_data([{<<"a">>, <<"1">>}])
+        )
+    ].

@@ -175,10 +175,17 @@ handle_info(_Msg, State) ->
 %% name we own. (An answer that just repeats one of our own registered
 %% values - e.g. a legitimate second registration under the same name,
 %% for round-robin - is not a conflict.)
+%%
+%% PTR is excluded: it's RFC 6763's "shared" record type (both the
+%% per-service-type enumeration PTR and the meta-enumeration PTR), where
+%% many different, simultaneously valid owners contributing different
+%% data under the same name is the normal case, not a conflict.
 check_conflicts(Entries) ->
     [maybe_notify_conflict(Entry) || Entry <- Entries],
     ok.
 
+maybe_notify_conflict({_Name, ptr, _Data, _Ttl, _CacheFlush}) ->
+    ok;
 maybe_notify_conflict({Name, Type, Data, _Ttl, _CacheFlush}) ->
     case mdns_registry:answers_for(Name, Type) of
         [] ->

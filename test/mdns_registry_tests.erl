@@ -33,6 +33,162 @@ registry_test_() ->
         ]
     end}.
 
+%% register_service/5,6 - all with probe => false, same rationale as
+%% above; see mdns_registry_probe_tests for its probing/conflict coverage.
+service_test_() ->
+    {setup, fun start/0, fun stop/1, fun(_) ->
+        [
+            fun registers_ptr_srv_and_txt_together/0,
+            fun empty_txt_kvs_publishes_one_empty_string/0,
+            fun unregister_withdraws_the_whole_service/0,
+            fun auto_withdraw_on_process_death_withdraws_the_whole_service/0,
+            fun meta_ptr_is_reference_counted_across_same_type_services/0,
+            fun target_host_need_not_be_separately_registered/0,
+            fun rejects_bad_service_type/0,
+            fun rejects_bad_port/0,
+            fun rejects_non_local_target_host/0,
+            fun rejects_validate_option_for_services/0
+        ]
+    end}.
+
+service_local_target(N) ->
+    "servicehost" ++ integer_to_list(N) ++ ".local".
+
+registers_ptr_srv_and_txt_together() ->
+    {ok, Ref, FinalName} = mdns_registry:register_service(
+        "My Printer", "_http._tcp", 631, [{"path", "/"}], service_local_target(1), #{
+            probe => false
+        }
+    ),
+    ?assertEqual("my printer._http._tcp.local", FinalName),
+    ?assertMatch(
+        [{{0, 0, 631, "servicehost1.local"}, _}],
+        mdns_registry:answers_for(FinalName, srv)
+    ),
+    ?assertMatch([{["path=/"], _}], mdns_registry:answers_for(FinalName, txt)),
+    ?assertMatch(
+        [{FinalName, _}], mdns_registry:answers_for("_http._tcp.local", ptr)
+    ),
+    ?assertMatch(
+        [{"_http._tcp.local", _}],
+        mdns_registry:answers_for("_services._dns-sd._udp.local", ptr)
+    ),
+    ok = mdns_registry:unregister(Ref).
+
+empty_txt_kvs_publishes_one_empty_string() ->
+    {ok, Ref, FinalName} = mdns_registry:register_service(
+        "No Txt", "_http._tcp", 80, [], service_local_target(2), #{probe => false}
+    ),
+    ?assertMatch([{[""], _}], mdns_registry:answers_for(FinalName, txt)),
+    ok = mdns_registry:unregister(Ref).
+
+unregister_withdraws_the_whole_service() ->
+    {ok, Ref, FinalName} = mdns_registry:register_service(
+        "Gone Soon", "_http._tcp", 80, [], service_local_target(3), #{probe => false}
+    ),
+    ok = mdns_registry:unregister(Ref),
+    ?assertEqual([], mdns_registry:answers_for(FinalName, srv)),
+    ?assertEqual([], mdns_registry:answers_for(FinalName, txt)),
+    ?assertEqual([], mdns_registry:answers_for("_http._tcp.local", ptr)),
+    ?assertEqual([], mdns_registry:answers_for("_services._dns-sd._udp.local", ptr)).
+
+auto_withdraw_on_process_death_withdraws_the_whole_service() ->
+    Parent = self(),
+    Pid = spawn(fun() ->
+        {ok, _Ref, FinalName} = mdns_registry:register_service(
+            "Dying Service", "_http._tcp", 80, [], service_local_target(4), #{probe => false}
+        ),
+        Parent ! {registered, FinalName},
+        receive
+            stop -> ok
+        end
+    end),
+    FinalName =
+        receive
+            {registered, F} -> F
+        after 1000 -> ?assert(false)
+        end,
+    Mon = monitor(process, Pid),
+    exit(Pid, kill),
+    receive
+        {'DOWN', Mon, process, Pid, killed} -> ok
+    after 1000 -> ?assert(false)
+    end,
+    timer:sleep(50),
+    ?assertEqual([], mdns_registry:answers_for(FinalName, srv)),
+    ?assertEqual([], mdns_registry:answers_for("_http._tcp.local", ptr)),
+    ?assertEqual([], mdns_registry:answers_for("_services._dns-sd._udp.local", ptr)).
+
+meta_ptr_is_reference_counted_across_same_type_services() ->
+    {ok, Ref1, _} = mdns_registry:register_service(
+        "Svc One", "_ipp._tcp", 80, [], service_local_target(5), #{probe => false}
+    ),
+    {ok, Ref2, _} = mdns_registry:register_service(
+        "Svc Two", "_ipp._tcp", 81, [], service_local_target(6), #{probe => false}
+    ),
+    ?assertMatch(
+        [{"_ipp._tcp.local", _}],
+        mdns_registry:answers_for("_services._dns-sd._udp.local", ptr)
+    ),
+    ok = mdns_registry:unregister(Ref1),
+    %% Svc Two is still live - the shared meta-PTR must not be withdrawn yet.
+    ?assertMatch(
+        [{"_ipp._tcp.local", _}],
+        mdns_registry:answers_for("_services._dns-sd._udp.local", ptr)
+    ),
+    ok = mdns_registry:unregister(Ref2),
+    ?assertEqual([], mdns_registry:answers_for("_services._dns-sd._udp.local", ptr)).
+
+target_host_need_not_be_separately_registered() ->
+    %% "otherhost.local" is never registered via mdns_registry:register/2,3
+    %% - the SRV target can be an arbitrary .local name.
+    {ok, Ref, FinalName} = mdns_registry:register_service(
+        "Proxy Svc", "_http._tcp", 80, [], "otherhost.local", #{probe => false}
+    ),
+    ?assertMatch(
+        [{{0, 0, 80, "otherhost.local"}, _}], mdns_registry:answers_for(FinalName, srv)
+    ),
+    ok = mdns_registry:unregister(Ref).
+
+rejects_bad_service_type() ->
+    ?assertMatch(
+        {error, {invalid_service_type, _}},
+        mdns_registry:register_service(
+            "X", "not-a-service-type", 80, [], service_local_target(7)
+        )
+    ),
+    ?assertMatch(
+        {error, {invalid_service_type, _}},
+        mdns_registry:register_service("X", "_http._sctp", 80, [], service_local_target(7))
+    ).
+
+rejects_bad_port() ->
+    ?assertMatch(
+        {error, {invalid_port, _}},
+        mdns_registry:register_service("X", "_http._tcp", -1, [], service_local_target(8))
+    ),
+    ?assertMatch(
+        {error, {invalid_port, _}},
+        mdns_registry:register_service("X", "_http._tcp", 70000, [], service_local_target(8))
+    ).
+
+rejects_non_local_target_host() ->
+    ?assertMatch(
+        {error, {not_local, _}},
+        mdns_registry:register_service("X", "_http._tcp", 80, [], "example.com")
+    ).
+
+rejects_validate_option_for_services() ->
+    %% `validate` is a register/2,3-only option (there's no address to
+    %% sanity-check for a service) - unlike register/2,3, this must be
+    %% rejected rather than silently ignored.
+    ?assertMatch(
+        {error, {invalid_opts, _}},
+        mdns_registry:register_service(
+            "X", "_http._tcp", 80, [], service_local_target(9), #{validate => false}
+        )
+    ).
+
 start() ->
     {ok, Pid} = mdns_registry:start_link(),
     Pid.

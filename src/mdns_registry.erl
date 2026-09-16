@@ -1,16 +1,22 @@
 %%%-------------------------------------------------------------------
-%% @doc Registry of names published via the mdns:register/2,3 API and
+%% @doc Registry of names published via the mdns:register/2,3 (plain
+%% hostnames) and mdns:register_service/5,6 (DNS-SD, RFC 6763) APIs, and
 %% announced over mDNS. A registration is tied to the lifetime of the
 %% calling process: if it dies without unregistering, we send a goodbye
 %% (TTL=0) and clean up automatically.
 %%
 %% Implements RFC 6762 sections 8 and 9:
 %%
-%% - Probing (8.1): before claiming a name, register/2,3 (in the calling
-%%   process, not this gen_server - probing takes real time, at least
-%%   ~750ms for three probes 250ms apart, and must not block every other
-%%   registration attempt while it runs) sends probe queries and listens
-%%   for a conflicting answer or a competing simultaneous probe.
+%% - Probing (8.1): before claiming a name, register/2,3 and
+%%   register_service/5,6 (in the calling process, not this gen_server -
+%%   probing takes real time, at least ~750ms for three probes 250ms
+%%   apart, and must not block every other registration attempt while it
+%%   runs) send probe queries and listen for a conflicting answer or a
+%%   competing simultaneous probe. A service registration probes its SRV
+%%   and TXT records sequentially rather than as a single combined
+%%   RFC 6762-recommended ANY-type probe - simpler, and since nothing is
+%%   committed until both clear, still fully correct, just ~1.5s instead
+%%   of ~750ms on the (presumably rarer) service-registration path.
 %%   Simultaneous-probe tie-breaking (8.2, the lexicographic-comparison
 %%   corner case for two hosts probing the identical name at the
 %%   identical instant) is deliberately simplified to "treat it as a
@@ -22,23 +28,39 @@
 %%   host starts answering for it with different data (mdns_socket
 %%   notifies us via notify_conflict/3), we reassert our own data once;
 %%   if the same conflict recurs within ?DEFEND_GRACE_MS, we give up -
-%%   withdraw every registration under that {Name, Type} and send each
-%%   owning process `{mdns_bridge_conflict, Ref, Name}` - unless any of
-%%   them registered with `on_conflict => force`, in which case we just
-%%   keep defending forever. This is scoped to {Name, Type} as a whole,
-%%   not per individual registration, since this registry allows more
-%%   than one registration to legitimately share a name (round-robin) and
-%%   there's no way to tell "an external squatter" from "our own other
-%%   registration" apart from data already being one of our own values.
+%%   withdraw every registration under that {Name, Type} (for a service,
+%%   this means the whole service - SRV/TXT/PTR/meta-PTR contribution,
+%%   not just whichever record type the conflict showed up on) and send
+%%   each owning process `{mdns_bridge_conflict, Ref, Name}` - unless any
+%%   of them registered with `on_conflict => force`, in which case we
+%%   just keep defending forever. Conflict scope is {Name, Type} as a
+%%   whole, not per individual registration, since this registry allows
+%%   more than one registration to legitimately share a name
+%%   (round-robin) and there's no way to tell "an external squatter" from
+%%   "our own other registration" apart from data already being one of
+%%   our own values.
 %%
 %% What a detected conflict (probe-time or ongoing) actually does is the
-%% `on_conflict` option to register/2,3: `error` (fail/withdraw - the
-%% default), `force` (claim/keep it regardless), `{rename, Fun}`
-%% (probe-time only: call `Fun(OriginalName, Attempt)` for a new name and
-%% retry, up to max_rename_attempts - always the *original* name, not the
-%% previous attempt's, so a plain `Name ++ "-" ++ integer_to_list(Attempt)`
-%% Fun produces "foo-1", "foo-2", ... rather than compounding into
-%% "foo-1-2-3"), or `auto` (shorthand for exactly that Fun).
+%% `on_conflict` option: `error` (fail/withdraw - the default), `force`
+%% (claim/keep it regardless), `{rename, Fun}` (probe-time only: call
+%% `Fun(OriginalName, Attempt)` for a new name and retry, up to
+%% max_rename_attempts - always the *original* name, not the previous
+%% attempt's, so a plain `Name ++ "-" ++ integer_to_list(Attempt)` Fun
+%% produces "foo-1", "foo-2", ... rather than compounding into
+%% "foo-1-2-3"; for a service, `Name` is the plain instance label, not
+%% the full dotted name), or `auto` (shorthand for exactly that Fun).
+%%
+%% DNS-SD service registration publishes, atomically under one
+%% reference: a SRV + TXT record at the instance name (RFC 6763 4.1,
+%% probed/unique, like a host's A record), a PTR from the service type
+%% name to the instance name (4.1, shared - never probed, multiple
+%% instances of one type are the normal case), and increments a
+%% reference count towards a PTR from `_services._dns-sd._udp.local` to
+%% the service type name (9, the "what service types exist at all"
+%% meta-enumeration record) - withdrawn only once nothing references
+%% that service type anymore. The SRV target host does not need to have
+%% been registered via mdns:register/2,3 itself - any `.local` name is
+%% accepted.
 %% @end
 %%%-------------------------------------------------------------------
 -module(mdns_registry).
@@ -50,21 +72,28 @@
     start_link/0,
     register/2,
     register/3,
+    register_service/5,
+    register_service/6,
     unregister/1,
     answers_for/2,
     notify_conflict/3,
     refresh_interface/0
 ]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
--export_type([opts/0]).
+-export_type([opts/0, service_opts/0]).
 
 -define(SERVER, ?MODULE).
 -define(TAB, mdns_registry_tab).
 -define(DEFAULT_TTL, 120).
+%% RFC 6763 recommends a much longer TTL for service records than for a
+%% plain host's A record, since they change far less often.
+-define(DEFAULT_SERVICE_TTL, 4500).
 -define(REANNOUNCE_FOLLOWUP_MS, 1000).
 -define(DEFAULT_REANNOUNCE_INTERVAL_MS, 60000).
 -define(DEFAULT_MAX_RENAME_ATTEMPTS, 10).
 -define(KNOWN_OPTS, [validate, probe, on_conflict]).
+-define(KNOWN_SERVICE_OPTS, [probe, on_conflict]).
+-define(META_SERVICE_NAME, "_services._dns-sd._udp.local").
 
 %% RFC 6762 8.1: three probes, 250ms apart, preceded by a random 0-249ms
 %% delay (spreads out synchronized probing after e.g. a mass power-on).
@@ -84,16 +113,27 @@
         ?is_octet(element(3, Ip)) andalso
         ?is_octet(element(4, Ip)))
 ).
+-define(is_port_number(P), (is_integer(P) andalso P >= 0 andalso P =< 65535)).
+
+-type key() :: {string(), atom(), term()}.
+%% reference() -> what to withdraw when this registration goes away:
+%% a plain host (one key) or a service (several keys sharing one
+%% reference count contribution towards the meta-enumeration PTR).
+-type registration() ::
+    {host, key(), pid()}
+    | {service, [key()], ServiceTypeName :: string(), pid()}.
 
 -record(state, {
     iface_ip :: inet:ip4_address(),
     netmask :: inet:ip4_address(),
-    %% reference() -> {Name, Type, Data}, so a DOWN or explicit
-    %% unregister can find what to withdraw.
-    monitors = #{} :: #{reference() => {string(), atom(), term()}},
+    monitors = #{} :: #{reference() => registration()},
     %% {Name, Type} -> monotonic ms of the last time we defended it -
     %% RFC 6762 section 9 ongoing conflict defense.
-    defenses = #{} :: #{{string(), atom()} => integer()}
+    defenses = #{} :: #{{string(), atom()} => integer()},
+    %% ServiceTypeName -> count of live service registrations of that
+    %% type, so the shared meta-enumeration PTR is only withdrawn once
+    %% nothing references it anymore.
+    meta_ptr_refs = #{} :: #{string() => pos_integer()}
 }).
 
 -type on_conflict() ::
@@ -102,6 +142,7 @@
     | auto
     | {rename, fun((string(), pos_integer()) -> string() | binary())}.
 -type opts() :: #{validate => boolean(), probe => boolean(), on_conflict => on_conflict()}.
+-type service_opts() :: #{probe => boolean(), on_conflict => on_conflict()}.
 
 child_spec() ->
     #{id => ?MODULE, start => {?MODULE, start_link, []}}.
@@ -121,12 +162,51 @@ register(Name, Ip, Opts) when is_map(Opts) ->
     %% never reach the gen_server as a bad message, since a crash there
     %% would take mdns_registry_tab (and every other caller's live
     %% registrations) down with it.
-    case validate_opts(Opts) of
+    case validate_opts(Opts, ?KNOWN_OPTS, [validate, probe]) of
         ok ->
             NormName = mdns_proto:normalize_name(Name),
             attempt_register(NormName, NormName, Ip, Opts, 1);
         {error, _} = Err ->
             Err
+    end.
+
+-spec register_service(
+    string() | binary(),
+    string() | binary(),
+    non_neg_integer(),
+    [{iodata(), iodata()} | iodata()],
+    string() | binary()
+) -> {ok, reference(), string()} | {error, term()}.
+register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost) ->
+    register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost, #{}).
+
+-spec register_service(
+    string() | binary(),
+    string() | binary(),
+    non_neg_integer(),
+    [{iodata(), iodata()} | iodata()],
+    string() | binary(),
+    service_opts()
+) -> {ok, reference(), string()} | {error, term()}.
+register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost, Opts) when is_map(Opts) ->
+    case validate_opts(Opts, ?KNOWN_SERVICE_OPTS, [probe]) of
+        {error, _} = Err ->
+            Err;
+        ok ->
+            case validate_service_args(ServiceType, Port, TargetHost) of
+                {error, _} = Err ->
+                    Err;
+                ok ->
+                    Ctx = #{
+                        service_type => ServiceType,
+                        service_type_name => mdns_proto:service_type_name(ServiceType),
+                        port => Port,
+                        txt => mdns_proto:build_txt_data(TxtKVs),
+                        target => mdns_proto:normalize_name(TargetHost),
+                        opts => Opts
+                    },
+                    attempt_register_service(InstanceName, Ctx, 1)
+            end
     end.
 
 -spec unregister(reference()) -> ok.
@@ -176,6 +256,15 @@ handle_call({commit, Name, Ip, Opts}, {FromPid, _Tag}, State) ->
         {error, _} = Err ->
             {reply, Err, State}
     end;
+handle_call(
+    {commit_service, InstanceFullName, ServiceTypeName, Port, Target, TxtData, Opts},
+    {FromPid, _Tag},
+    State
+) ->
+    {Ref, NewState} = do_register_service(
+        InstanceFullName, ServiceTypeName, Port, Target, TxtData, Opts, FromPid, State
+    ),
+    {reply, {ok, Ref}, NewState};
 handle_call({unregister, Ref}, _From, State) ->
     {reply, ok, withdraw(Ref, State)};
 handle_call(refresh_interface, _From, State) ->
@@ -222,34 +311,107 @@ attempt_register(OriginalName, CandidateName, Ip, Opts, Attempt) ->
                         no_conflict ->
                             commit(CandidateName, Ip, Opts);
                         {conflict, Reason} ->
-                            handle_probe_conflict(
-                                OriginalName, CandidateName, Ip, Opts, Attempt, Reason
+                            resolve_conflict_policy(
+                                OriginalName,
+                                CandidateName,
+                                Opts,
+                                Attempt,
+                                Reason,
+                                fun() -> commit(CandidateName, Ip, Opts) end,
+                                fun(NewName, NextAttempt) ->
+                                    attempt_register(OriginalName, NewName, Ip, Opts, NextAttempt)
+                                end
                             )
                     end
             end
     end.
 
-handle_probe_conflict(OriginalName, CandidateName, Ip, Opts, Attempt, Reason) ->
+commit(Name, Ip, Opts) ->
+    case gen_server:call(?SERVER, {commit, Name, Ip, Opts}) of
+        {ok, Ref} -> {ok, Ref, Name};
+        {error, _} = Err -> Err
+    end.
+
+%% -- register_service/5,6's probing + rename loop --------------------------
+
+attempt_register_service(InstanceLabel, Ctx, Attempt) ->
+    #{service_type := ServiceType, opts := Opts} = Ctx,
+    InstanceFullName = mdns_proto:service_instance_name(InstanceLabel, ServiceType),
+    case maps:get(probe, Opts, true) of
+        false ->
+            commit_service(InstanceFullName, Ctx);
+        true ->
+            case probe_service(InstanceFullName, Ctx) of
+                no_conflict ->
+                    commit_service(InstanceFullName, Ctx);
+                {conflict, Reason} ->
+                    resolve_conflict_policy(
+                        InstanceLabel,
+                        InstanceFullName,
+                        Opts,
+                        Attempt,
+                        Reason,
+                        fun() -> commit_service(InstanceFullName, Ctx) end,
+                        fun(NewLabel, NextAttempt) ->
+                            attempt_register_service(NewLabel, Ctx, NextAttempt)
+                        end
+                    )
+            end
+    end.
+
+%% Sequentially probes SRV then TXT for InstanceFullName - see the
+%% moduledoc for why this is sequential rather than one combined
+%% RFC 6762-recommended ANY-type probe. Nothing is committed until both
+%% clear, so this is fully correct either way.
+probe_service(InstanceFullName, Ctx) ->
+    #{port := Port, target := Target, txt := TxtData} = Ctx,
+    Ttl = application:get_env(mdns_bridge, service_ttl, ?DEFAULT_SERVICE_TTL),
+    SrvData = {0, 0, Port, Target},
+    case probe(InstanceFullName, srv, SrvData, Ttl) of
+        no_conflict ->
+            case probe(InstanceFullName, txt, TxtData, Ttl) of
+                no_conflict -> no_conflict;
+                {conflict, OtherData} -> {conflict, {txt, OtherData}}
+            end;
+        {conflict, OtherData} ->
+            {conflict, {srv, OtherData}}
+    end.
+
+commit_service(InstanceFullName, Ctx) ->
+    #{
+        service_type_name := ServiceTypeName,
+        port := Port,
+        target := Target,
+        txt := TxtData,
+        opts := Opts
+    } = Ctx,
+    Call = {commit_service, InstanceFullName, ServiceTypeName, Port, Target, TxtData, Opts},
+    case gen_server:call(?SERVER, Call) of
+        {ok, Ref} -> {ok, Ref, InstanceFullName};
+        {error, _} = Err -> Err
+    end.
+
+%% -- shared conflict-policy handling (used by both register flows) --------
+
+%% CommitFun/0 claims CandidateName as-is (force); RetryFun/2 restarts
+%% the whole attempt under a renamed candidate. Always renames from
+%% OriginalName (the plain label, not the previous attempt's derived
+%% name) - see the moduledoc.
+resolve_conflict_policy(OriginalName, CandidateName, Opts, Attempt, Reason, CommitFun, RetryFun) ->
     case resolve_on_conflict(maps:get(on_conflict, Opts, error)) of
         error ->
             {error, {name_conflict, CandidateName, Reason}};
         force ->
-            commit(CandidateName, Ip, Opts);
+            CommitFun();
         {rename, Fun} ->
             MaxAttempts = application:get_env(
                 mdns_bridge, max_rename_attempts, ?DEFAULT_MAX_RENAME_ATTEMPTS
             ),
             case Attempt < MaxAttempts of
                 true ->
-                    %% Always rename from the *original* name, not the
-                    %% last-tried candidate - so a plain "append -Attempt"
-                    %% Fun produces foo-1, foo-2, ... rather than
-                    %% compounding into foo-1-2-3.
                     case rename_via(Fun, OriginalName, Attempt) of
-                        {ok, NewName} ->
-                            attempt_register(OriginalName, NewName, Ip, Opts, Attempt + 1);
-                        {error, _} = Err ->
-                            Err
+                        {ok, NewName} -> RetryFun(NewName, Attempt + 1);
+                        {error, _} = Err -> Err
                     end;
                 false ->
                     {error, {name_conflict, CandidateName, Reason}}
@@ -259,7 +421,9 @@ handle_probe_conflict(OriginalName, CandidateName, Ip, Opts, Attempt, Reason) ->
 %% `auto` is shorthand for the rename scheme documented in the README:
 %% append "-Attempt" to the name - before the `.local` suffix, not after
 %% it, since "foo.local-1" isn't a `.local` name at all and would just
-%% fail the next precheck.
+%% fail the next precheck. For a service registration, Name here is the
+%% plain instance label (no `.local` suffix to begin with), so this
+%% degrades to a plain append - see split_local_suffix/1.
 resolve_on_conflict(auto) -> {rename, fun default_rename_fun/2};
 resolve_on_conflict(OnConflict) -> OnConflict.
 
@@ -282,12 +446,6 @@ rename_via(Fun, Name, Attempt) ->
     catch
         Class:Reason ->
             {error, {rename_fun_failed, {Class, Reason}}}
-    end.
-
-commit(Name, Ip, Opts) ->
-    case gen_server:call(?SERVER, {commit, Name, Ip, Opts}) of
-        {ok, Ref} -> {ok, Ref, Name};
-        {error, _} = Err -> Err
     end.
 
 %% RFC 6762 8.1: probe, then wait for a conflicting answer or a competing
@@ -327,17 +485,18 @@ flush_probe_messages(Name, Type) ->
 
 %% -- internal -------------------------------------------------------------
 
-%% `validate` and `probe` must be booleans if present; `on_conflict` must
-%% be `error`, `force`, `auto`, or `{rename, Fun}` with Fun a 2-arity
-%% fun; no unrecognized keys.
-validate_opts(Opts) ->
-    case maps:keys(Opts) -- ?KNOWN_OPTS of
-        [] -> validate_opt_values(Opts);
+%% `validate`/`probe` (whichever of the two are in BoolKeys - register/2,3
+%% checks both, register_service/5,6 only has `probe`) must be booleans
+%% if present; `on_conflict` must be `error`, `force`, `auto`, or
+%% `{rename, Fun}` with Fun a 2-arity fun; no unrecognized keys.
+validate_opts(Opts, KnownKeys, BoolKeys) ->
+    case maps:keys(Opts) -- KnownKeys of
+        [] -> validate_opt_values(Opts, BoolKeys);
         Unknown -> {error, {invalid_opts, Unknown}}
     end.
 
-validate_opt_values(Opts) ->
-    case is_valid_bool_opt(validate, Opts) andalso is_valid_bool_opt(probe, Opts) of
+validate_opt_values(Opts, BoolKeys) ->
+    case lists:all(fun(Key) -> is_valid_bool_opt(Key, Opts) end, BoolKeys) of
         false ->
             {error, {invalid_opts, bad_boolean_option}};
         true ->
@@ -378,6 +537,46 @@ validate_subnet(Ip, State) ->
         false -> {error, {address_not_on_subnet, Ip}}
     end.
 
+%% ServiceType must look like "_app._tcp"/"_app._udp"; Port must be a
+%% real port number; TargetHost must be a `.local` name (not required to
+%% be one this app itself has registered).
+validate_service_args(ServiceType, Port, TargetHost) ->
+    case is_valid_service_type(ServiceType) of
+        false ->
+            {error, {invalid_service_type, ServiceType}};
+        true ->
+            case ?is_port_number(Port) of
+                false -> {error, {invalid_port, Port}};
+                true -> validate_target_host(TargetHost)
+            end
+    end.
+
+validate_target_host(TargetHost) ->
+    case mdns_proto:is_local(mdns_proto:normalize_name(TargetHost)) of
+        true -> ok;
+        false -> {error, {not_local, TargetHost}}
+    end.
+
+is_valid_service_type(ServiceType) ->
+    case split_service_type(ServiceType) of
+        {ok, App, Proto} ->
+            lists:prefix("_", App) andalso
+                length(App) > 1 andalso
+                (Proto =:= "_tcp" orelse Proto =:= "_udp");
+        error ->
+            false
+    end.
+
+split_service_type(ServiceType) when is_binary(ServiceType) ->
+    split_service_type(unicode:characters_to_list(ServiceType));
+split_service_type(ServiceType) when is_list(ServiceType) ->
+    case string:split(ServiceType, ".") of
+        [App, Proto] when App =/= [] -> {ok, App, Proto};
+        _ -> error
+    end;
+split_service_type(_) ->
+    error.
+
 do_register(Name, Ip, Opts, FromPid, State) ->
     Key = {Name, a, Ip},
     Monitors0 = demonitor_previous_owner(Key, State#state.monitors),
@@ -387,7 +586,44 @@ do_register(Name, Ip, Opts, FromPid, State) ->
     ets:insert(?TAB, {Key, #{ref => Ref, pid => FromPid, ttl => Ttl, on_conflict => OnConflict}}),
     mdns_socket:announce(Name, a, [{Ip, Ttl}]),
     erlang:send_after(?REANNOUNCE_FOLLOWUP_MS, self(), {reannounce_one, Key}),
-    {Ref, State#state{monitors = Monitors0#{Ref => Key}}}.
+    {Ref, State#state{monitors = Monitors0#{Ref => {host, Key, FromPid}}}}.
+
+do_register_service(InstanceFullName, ServiceTypeName, Port, Target, TxtData, Opts, FromPid, State) ->
+    Ttl = application:get_env(mdns_bridge, service_ttl, ?DEFAULT_SERVICE_TTL),
+    SrvKey = {InstanceFullName, srv, {0, 0, Port, Target}},
+    TxtKey = {InstanceFullName, txt, TxtData},
+    PtrKey = {ServiceTypeName, ptr, InstanceFullName},
+    OnConflict = maps:get(on_conflict, Opts, error),
+    Monitors0 = demonitor_previous_owner(SrvKey, State#state.monitors),
+    Monitors1 = demonitor_previous_owner(TxtKey, Monitors0),
+    Monitors2 = demonitor_previous_owner(PtrKey, Monitors1),
+    Ref = erlang:monitor(process, FromPid),
+    RowValue = #{ref => Ref, pid => FromPid, ttl => Ttl, on_conflict => OnConflict},
+    ets:insert(?TAB, [{SrvKey, RowValue}, {TxtKey, RowValue}, {PtrKey, RowValue}]),
+    mdns_socket:announce(InstanceFullName, srv, [{{0, 0, Port, Target}, Ttl}]),
+    mdns_socket:announce(InstanceFullName, txt, [{TxtData, Ttl}]),
+    mdns_socket:announce(ServiceTypeName, ptr, [{InstanceFullName, Ttl}]),
+    erlang:send_after(?REANNOUNCE_FOLLOWUP_MS, self(), {reannounce_one, SrvKey}),
+    erlang:send_after(?REANNOUNCE_FOLLOWUP_MS, self(), {reannounce_one, TxtKey}),
+    erlang:send_after(?REANNOUNCE_FOLLOWUP_MS, self(), {reannounce_one, PtrKey}),
+    {MetaRefs, ShouldAnnounceMeta} = bump_meta_ptr(ServiceTypeName, State#state.meta_ptr_refs),
+    ShouldAnnounceMeta andalso
+        begin
+            ets:insert(?TAB, {{?META_SERVICE_NAME, ptr, ServiceTypeName}, #{ttl => Ttl}}),
+            mdns_socket:announce(?META_SERVICE_NAME, ptr, [{ServiceTypeName, Ttl}])
+        end,
+    NewMonitors = Monitors2#{Ref => {service, [SrvKey, TxtKey, PtrKey], ServiceTypeName, FromPid}},
+    {Ref, State#state{monitors = NewMonitors, meta_ptr_refs = MetaRefs}}.
+
+bump_meta_ptr(ServiceTypeName, Refs) ->
+    Count = maps:get(ServiceTypeName, Refs, 0),
+    {Refs#{ServiceTypeName => Count + 1}, Count =:= 0}.
+
+release_meta_ptr(ServiceTypeName, Refs) ->
+    case maps:get(ServiceTypeName, Refs, 0) of
+        Count when Count =< 1 -> {maps:remove(ServiceTypeName, Refs), true};
+        Count -> {Refs#{ServiceTypeName => Count - 1}, false}
+    end.
 
 demonitor_previous_owner(Key, Monitors) ->
     case ets:lookup(?TAB, Key) of
@@ -398,15 +634,40 @@ demonitor_previous_owner(Key, Monitors) ->
             Monitors
     end.
 
+%% Withdraws whatever Ref refers to (host or service) - used for an
+%% explicit unregister/1 and a DOWN. No owner notification: the caller
+%% either asked for this, or is already dead. Ongoing conflict defense
+%% giving up uses withdraw_due_to_conflict/2 instead, which does notify.
 withdraw(Ref, State) ->
+    do_withdraw(Ref, State, false).
+
+withdraw_due_to_conflict(Ref, State) ->
+    do_withdraw(Ref, State, true).
+
+do_withdraw(Ref, State, Notify) ->
     case maps:take(Ref, State#state.monitors) of
-        {Key, Monitors} ->
+        {Registration, Monitors} ->
             erlang:demonitor(Ref, [flush]),
-            maybe_delete_and_goodbye(Key, Ref),
-            State#state{monitors = Monitors};
+            withdraw_registration(Ref, Registration, Notify, State#state{monitors = Monitors});
         error ->
             State
     end.
+
+withdraw_registration(Ref, {host, {Name, _Type, _Data} = Key, Pid}, Notify, State) ->
+    maybe_delete_and_goodbye(Key, Ref),
+    Notify andalso (Pid ! {mdns_bridge_conflict, Ref, Name}),
+    State;
+withdraw_registration(Ref, {service, Keys, ServiceType, Pid}, Notify, State) ->
+    [maybe_delete_and_goodbye(Key, Ref) || Key <- Keys],
+    [{InstanceName, _, _} | _] = Keys,
+    Notify andalso (Pid ! {mdns_bridge_conflict, Ref, InstanceName}),
+    {NewMetaRefs, ShouldGoodbye} = release_meta_ptr(ServiceType, State#state.meta_ptr_refs),
+    ShouldGoodbye andalso
+        begin
+            ets:delete(?TAB, {?META_SERVICE_NAME, ptr, ServiceType}),
+            mdns_socket:announce(?META_SERVICE_NAME, ptr, [{ServiceType, 0}])
+        end,
+    State#state{meta_ptr_refs = NewMetaRefs}.
 
 %% Only remove/goodbye if this Ref is still the current owner of Key - a
 %% newer registration may have taken it over since (see
@@ -479,14 +740,13 @@ defend(Name, Type, Rows, State) ->
     Now = erlang:monotonic_time(millisecond),
     State#state{defenses = (State#state.defenses)#{{Name, Type} => Now}}.
 
+%% Withdraws every *registration* touching Rows (not just the rows
+%% themselves) - so if one of them is a service's SRV row, the whole
+%% service (SRV/TXT/PTR/meta-PTR) goes with it, rather than orphaning
+%% the rest of it.
 give_up(Name, Type, Rows, State) ->
-    NewState = lists:foldl(fun withdraw_row/2, State, Rows),
-    [mdns_socket:announce(Name, Type, [{Data, 0}]) || {{_, _, Data}, _Value} <- Rows],
+    Refs = lists:usort([Ref || {_Key, #{ref := Ref}} <- Rows]),
+    NewState = lists:foldl(
+        fun(Ref, AccState) -> withdraw_due_to_conflict(Ref, AccState) end, State, Refs
+    ),
     NewState#state{defenses = maps:remove({Name, Type}, NewState#state.defenses)}.
-
-withdraw_row({Key, #{ref := Ref, pid := Pid}}, State) ->
-    {Name, _Type, _Data} = Key,
-    ets:delete(?TAB, Key),
-    erlang:demonitor(Ref, [flush]),
-    Pid ! {mdns_bridge_conflict, Ref, Name},
-    State#state{monitors = maps:remove(Ref, State#state.monitors)}.

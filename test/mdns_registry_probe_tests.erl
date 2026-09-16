@@ -19,6 +19,23 @@ probe_test_() ->
         ]
     end}.
 
+%% register_service/5,6 probes SRV then TXT (see mdns_registry's
+%% moduledoc); the PTR (both the per-type and meta-enumeration one) is
+%% never probed, so there's no PTR-conflict test here - only SRV/TXT.
+%% Each test below uses its own service type so the type-level PTR and
+%% meta-PTR assertions can't be affected by another test's registration.
+service_probe_test_() ->
+    {setup, fun start/0, fun stop/1, fun(_) ->
+        [
+            {timeout, 10, fun probes_and_claims_an_uncontested_service/0},
+            {timeout, 10, fun srv_conflict_fails_registration_by_default/0},
+            {timeout, 10, fun txt_conflict_fails_registration_by_default/0},
+            {timeout, 10, fun force_claims_service_despite_conflict/0},
+            {timeout, 20, fun rename_retries_service_under_a_new_label_until_uncontested/0},
+            {timeout, 10, fun auto_is_shorthand_for_service_label_attempt_number/0}
+        ]
+    end}.
+
 start() ->
     {ok, CachePid} = mdns_cache:start_link(),
     {ok, SocketPid} = mdns_socket:start_link(),
@@ -136,4 +153,102 @@ rename_does_not_compound_across_repeated_conflicts() ->
     {ok, Ref, FinalName} = mdns:register("probe-compound.local", Ip, #{on_conflict => auto}),
     ?assertEqual("probe-compound-2.local", FinalName),
     ?assertMatch([{Ip, _}], mdns_registry:answers_for(FinalName, a)),
+    ok = mdns:unregister(Ref).
+
+probes_and_claims_an_uncontested_service() ->
+    ServiceType = "_probeclean._tcp",
+    ServiceTypeName = mdns_proto:service_type_name(ServiceType),
+    {ok, Ref, FinalName} = mdns:register_service(
+        "Probe Clean", ServiceType, 8080, [{"path", "/"}], "probetarget.local"
+    ),
+    ?assertEqual(mdns_proto:service_instance_name("Probe Clean", ServiceType), FinalName),
+    ?assertMatch(
+        [{{0, 0, 8080, "probetarget.local"}, _}], mdns_registry:answers_for(FinalName, srv)
+    ),
+    ?assertMatch([{["path=/"], _}], mdns_registry:answers_for(FinalName, txt)),
+    ?assertMatch([{FinalName, _}], mdns_registry:answers_for(ServiceTypeName, ptr)),
+    ?assertMatch(
+        [{ServiceTypeName, _}],
+        mdns_registry:answers_for("_services._dns-sd._udp.local", ptr)
+    ),
+    ok = mdns:unregister(Ref),
+    ?assertEqual([], mdns_registry:answers_for(FinalName, srv)),
+    ?assertEqual([], mdns_registry:answers_for(ServiceTypeName, ptr)),
+    ?assertEqual([], mdns_registry:answers_for("_services._dns-sd._udp.local", ptr)).
+
+srv_conflict_fails_registration_by_default() ->
+    ServiceType = "_probesrvconflict._tcp",
+    FullName = mdns_proto:service_instance_name("Probe Srv Conflict", ServiceType),
+    OtherSrv = {0, 0, 9999, "othertarget.local"},
+    spawn_conflicting_responder(FullName, srv, OtherSrv),
+    ?assertMatch(
+        {error, {name_conflict, FullName, {srv, OtherSrv}}},
+        mdns:register_service("Probe Srv Conflict", ServiceType, 8080, [], "probetarget.local")
+    ),
+    ?assertEqual([], mdns_registry:answers_for(FullName, srv)).
+
+txt_conflict_fails_registration_by_default() ->
+    ServiceType = "_probetxtconflict._tcp",
+    FullName = mdns_proto:service_instance_name("Probe Txt Conflict", ServiceType),
+    OtherTxt = ["other=data"],
+    spawn_conflicting_responder(FullName, txt, OtherTxt),
+    ?assertMatch(
+        {error, {name_conflict, FullName, {txt, OtherTxt}}},
+        mdns:register_service("Probe Txt Conflict", ServiceType, 8080, [], "probetarget.local")
+    ),
+    %% Nothing commits until both SRV and TXT probes clear, so the
+    %% (uncontested) SRV must not have been claimed either.
+    ?assertEqual([], mdns_registry:answers_for(FullName, srv)),
+    ?assertEqual([], mdns_registry:answers_for(FullName, txt)).
+
+force_claims_service_despite_conflict() ->
+    ServiceType = "_probeforce._tcp",
+    FullName = mdns_proto:service_instance_name("Probe Force", ServiceType),
+    OtherSrv = {0, 0, 9999, "othertarget.local"},
+    spawn_conflicting_responder(FullName, srv, OtherSrv),
+    {ok, Ref, FullName} = mdns:register_service(
+        "Probe Force", ServiceType, 8080, [], "probetarget.local", #{on_conflict => force}
+    ),
+    ?assertMatch(
+        [{{0, 0, 8080, "probetarget.local"}, _}], mdns_registry:answers_for(FullName, srv)
+    ),
+    ok = mdns:unregister(Ref).
+
+%% Fun runs on the plain label ("Probe Rename"), not the full dotted
+%% name - see mdns:register_service/6's doc.
+rename_retries_service_under_a_new_label_until_uncontested() ->
+    ServiceType = "_proberename._tcp",
+    FullName = mdns_proto:service_instance_name("Probe Rename", ServiceType),
+    OtherSrv = {0, 0, 9999, "othertarget.local"},
+    spawn_conflicting_responder(FullName, srv, OtherSrv),
+    RenameFun = fun(Label, Attempt) -> Label ++ "-" ++ integer_to_list(Attempt) end,
+    {ok, Ref, FinalName} = mdns:register_service(
+        "Probe Rename",
+        ServiceType,
+        8080,
+        [],
+        "probetarget.local",
+        #{on_conflict => {rename, RenameFun}}
+    ),
+    ?assertEqual(
+        mdns_proto:service_instance_name("Probe Rename-1", ServiceType), FinalName
+    ),
+    ?assertMatch(
+        [{{0, 0, 8080, "probetarget.local"}, _}], mdns_registry:answers_for(FinalName, srv)
+    ),
+    ?assertEqual([], mdns_registry:answers_for(FullName, srv)),
+    ok = mdns:unregister(Ref).
+
+auto_is_shorthand_for_service_label_attempt_number() ->
+    ServiceType = "_probeauto._tcp",
+    OtherSrv = {0, 0, 9999, "othertarget.local"},
+    spawn_conflicting_responder(
+        mdns_proto:service_instance_name("Probe Auto", ServiceType), srv, OtherSrv
+    ),
+    {ok, Ref, FinalName} = mdns:register_service(
+        "Probe Auto", ServiceType, 8080, [], "probetarget.local", #{on_conflict => auto}
+    ),
+    ?assertEqual(
+        mdns_proto:service_instance_name("Probe Auto-1", ServiceType), FinalName
+    ),
     ok = mdns:unregister(Ref).
