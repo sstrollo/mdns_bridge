@@ -1,0 +1,51 @@
+name: Release
+
+# Fires on a tag push matching the YY.MM.N release-naming scheme (e.g.
+# 26.09.0, 26.09.1, 26.10.0). Tags are pushed manually - this workflow
+# only turns "a matching tag exists" into a visible GitHub Release; it
+# doesn't decide what to tag or when.
+on:
+  push:
+    tags:
+      - "[0-9][0-9].[0-9][0-9].[0-9]*"
+
+# The default GITHUB_TOKEN is often read-only for repo contents unless a
+# workflow asks for more - `gh release create` needs write access.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Re-validate the tagged commit itself before publishing anything,
+      # in case it was tagged from somewhere other than a green `main`.
+      # One representative OTP version, not the full CI matrix - that
+      # already ran on every push, this is a release-time gate, not a
+      # second full test run.
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          rebar3-version: "3.27"
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Check formatting (erlfmt)
+        run: rebar3 fmt --check
+
+      - name: Run EUnit tests
+        run: rebar3 eunit
+
+      - name: Dialyzer
+        run: rebar3 dialyzer
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

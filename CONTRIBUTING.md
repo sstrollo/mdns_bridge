@@ -46,3 +46,25 @@ Project-specific notes
 - No comments explaining *what* code does - name things well instead.
   A comment earns its place by explaining a non-obvious *why* (a spec
   detail, a workaround, an invariant a reader could easily get wrong).
+
+Releases
+--------
+
+Version scheme is `YY.MM.N` - two-digit year, two-digit month, and a
+0-based counter for the Nth release cut that month (so the first release
+in a given month is `.0`, a second the same month is `.1`, and so on).
+Tags are named exactly the same as the release.
+
+To cut one, tag the commit and push the tag:
+
+```sh
+git tag 26.09.0
+git push origin 26.09.0
+```
+
+Pushing a tag matching that shape triggers
+`.github/workflows/release.yml`, which re-validates the tagged commit
+(compile, `erlfmt`, `eunit`, `dialyzer` - a release-time gate, not a
+second full CI matrix run) and then publishes a GitHub Release for that
+tag with auto-generated release notes. Nothing computes the next version
+number for you - decide it yourself before tagging.
