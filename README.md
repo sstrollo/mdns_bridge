@@ -1,8 +1,7 @@
 mdns
 =====
 
-<!-- Update OWNER/REPO once this is pushed to GitHub. -->
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![CI](https://github.com/sstrollo/mdns/actions/workflows/ci.yml/badge.svg)](https://github.com/sstrollo/mdns/actions/workflows/ci.yml)
 
 An embeddable mDNS server / gateway for Erlang: it listens to mDNS
 traffic on the network, caches what it learns, and bridges `.local` name
