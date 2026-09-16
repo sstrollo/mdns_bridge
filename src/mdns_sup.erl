@@ -34,7 +34,8 @@ init([]) ->
     ChildSpecs = [
         mdns_cache:child_spec(),
         mdns_socket:child_spec(),
-        mdns_query:child_spec()
+        mdns_query:child_spec(),
+        mdns_dns_server:child_spec()
     ],
     {ok, {SupFlags, ChildSpecs}}.
 
