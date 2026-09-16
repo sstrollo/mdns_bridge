@@ -1,5 +1,10 @@
 %%%-------------------------------------------------------------------
-%% @doc Public API: register a `.local` name to announce over mDNS.
+%% @doc Public API: register a `.local' name to announce over mDNS.
+%%
+%% By default this probes for a conflict first (RFC 6762 section 8)
+%% before claiming the name, and keeps defending it for as long as it's
+%% registered (RFC 6762 section 9) - see register/3's `probe` and
+%% `on_conflict` options to change that.
 %%
 %% A registration is tied to the calling process - if it exits without
 %% unregistering, the name is automatically withdrawn (a goodbye packet
@@ -12,7 +17,7 @@
 
 %% @doc Equivalent to `register(Name, Ip, #{})'.
 -spec register(string() | binary(), inet:ip4_address()) ->
-    {ok, reference()} | {error, term()}.
+    {ok, reference(), string()} | {error, term()}.
 register(Name, Ip) ->
     mdns_registry:register(Name, Ip).
 
@@ -23,16 +28,41 @@ register(Name, Ip) ->
 %% publish an address outside it anyway (e.g. one this host doesn't
 %% itself own, being announced on another device's behalf).
 %%
-%% Returns a reference to pass to unregister/1. The registration is also
-%% withdrawn automatically if the calling process exits.
+%% By default, probes for a conflict (RFC 6762 section 8) before
+%% claiming the name - pass `#{probe => false}' to skip that and claim
+%% it immediately instead, trusting the caller that it's unique.
+%%
+%% `on_conflict' controls what happens on a detected conflict, both at
+%% probe time and later while the name is held (RFC 6762 section 9):
+%%   - `error' (the default) - fail the registration / withdraw it.
+%%   - `force' - claim/keep the name regardless of the conflict.
+%%   - `{rename, Fun}' - probe time only: call `Fun(Name, Attempt)' for
+%%     a new name to try instead, up to the configured
+%%     `max_rename_attempts' (default 10). `Fun' receives the name that
+%%     just conflicted and the 1-based attempt number, and returns the
+%%     next name to try - e.g. `fun(N, Attempt) -> N ++ "-" ++
+%%     integer_to_list(Attempt) end' (applied to the *original* domain
+%%     part, not accumulated, since Name here is always whatever `Fun'
+%%     itself last returned).
+%%
+%% Returns `{ok, Ref, FinalName}' on success - `FinalName' is the name
+%% actually claimed, which can differ from `Name' if `{rename, Fun}'
+%% resolved a conflict. Keep `Ref' - it's what `unregister/1' takes, and
+%% what a later `{mdns_bridge_conflict, Ref, FinalName}' message (sent to
+%% the calling process if ongoing defense ever has to give up the name)
+%% will reference.
+%%
+%% The registration is withdrawn automatically if the calling process
+%% exits.
 -spec register(string() | binary(), inet:ip4_address(), mdns_registry:opts()) ->
-    {ok, reference()} | {error, term()}.
+    {ok, reference(), string()} | {error, term()}.
 register(Name, Ip, Opts) ->
     mdns_registry:register(Name, Ip, Opts).
 
 %% @doc Withdraw a name registered with register/2,3. Idempotent - a
-%% reference that's already gone (unregistered, or its owner already
-%% exited) is not an error.
+%% reference that's already gone (unregistered, its owner already
+%% exited, or ongoing conflict defense already gave it up) is not an
+%% error.
 -spec unregister(reference()) -> ok.
 unregister(Ref) ->
     mdns_registry:unregister(Ref).

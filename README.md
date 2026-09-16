@@ -24,20 +24,22 @@ Features
 - Lets Erlang code [publish names](#publishing-names) over mDNS via
   `mdns:register/2,3` - including addresses other than the host's own
   (announcing on another device's behalf) - with the registration tied
-  to the calling process's lifetime.
+  to the calling process's lifetime. Probes for a conflict before
+  claiming a name and defends it for as long as it's held (RFC 6762
+  sections 8 and 9), with a pluggable policy for what to do about one.
 - Built on OTP's own `inet_dns` for wire (de)coding, which already
   understands RFC 6762 (mDNS) framing - see `CONTRIBUTING.md`.
 
 Status
 ------
 
-Both halves described above are implemented: learning/bridging (phase 1)
-and publishing (phase 2). Deliberately out of scope for now: RFC 6762
-probing and conflict resolution - registrations are announced trusting
-the caller that the name is meant to be unique, rather than probing for
-a live conflict and negotiating over it. See
-[Publishing names](#publishing-names) for what that means in practice
-and what the extension point for it will look like.
+Learning/bridging (phase 1) and publishing (phase 2, including probing,
+conflict policies, and ongoing conflict defense) are implemented. The one
+deliberate simplification: RFC 6762 8.2's simultaneous-probe tie-breaking
+(two hosts probing the identical name at the identical instant, resolved
+by a lexicographic comparison) is treated as a plain conflict rather than
+implementing the actual tie-break comparison - see
+[Publishing names](#publishing-names).
 
 Requirements
 ------------
@@ -81,7 +83,9 @@ Try it:
 Test
 ----
 
-Pure-logic unit tests:
+Pure-logic unit tests, plus `mdns_registry_probe_tests` which exercises
+real probing/conflict/rename traffic over the loopback-visible multicast
+group (no external peer needed - it plays both sides itself):
 
     $ rebar3 eunit
 
@@ -162,10 +166,17 @@ Publishing names
 calling process:
 
 ```erlang
-{ok, Ref} = mdns:register("my-service.local", {192, 168, 1, 42}),
+{ok, Ref, FinalName} = mdns:register("my-service.local", {192, 168, 1, 42}),
 %% ... later, when you're done with it ...
 ok = mdns:unregister(Ref).
 ```
+
+By default this probes for a conflict first (RFC 6762 section 8: three
+probe queries, 250ms apart, so this call typically takes at least
+~750ms) before claiming the name, and keeps defending it against a
+conflicting claim for as long as it's registered (RFC 6762 section 9).
+`FinalName` is the name actually claimed - normally the same as what you
+passed, but see `{rename, Fun}` below for when it isn't.
 
 The registration is tied to the calling process: if it exits without
 calling `unregister/1`, the name is withdrawn automatically (a goodbye
@@ -189,15 +200,56 @@ mdns:register("other-device.local", {192, 168, 1, 99}, #{validate => false}).
 
 Registering the same `{name, address}` again - from the same process or
 a different one - takes over the registration; the previous owner no
-longer affects it. This app does not implement RFC 6762 probing or
-defend a name against a conflicting claim from elsewhere on the network:
-it trusts that whatever calls `register/2,3` already knows the name is
-meant to be unique. If that ever needs to change, the natural extension
-point is a `conflict` (or similarly named) option to `register/3` with
-policies like `error` (fail if already probed as in use elsewhere),
-`force` (claim it regardless), or a rename callback - rather than the
-"just append `(2)` to the name" approach some minimal implementations
-fall back to.
+longer affects it, and it isn't treated as a conflict (that specific
+combination is, by definition, something we ourselves already hold).
+
+### Conflict handling
+
+`on_conflict` controls what happens when a conflict is detected, both
+during the initial probe and later while the name is held:
+
+- `error` (the default) - fail the registration (`{error, {name_conflict,
+  Name, ConflictingData}}`) or, if the conflict shows up later while the
+  name is already held, withdraw it and send the owning process
+  `{mdns_bridge_conflict, Ref, Name}`.
+- `force` - claim the name regardless of a probe conflict, and never give
+  it up on an ongoing one - always keep reasserting it instead.
+- `{rename, Fun}` - probe time only: call `Fun(Name, Attempt)` (1-based
+  `Attempt`) for a new name to try instead, and probe that one, up to
+  `max_rename_attempts` (default 10) tries:
+
+  ```erlang
+  Fun = fun(Name, Attempt) -> Name ++ "-" ++ integer_to_list(Attempt) end,
+  mdns:register("printer.local", Ip, #{on_conflict => {rename, Fun}}).
+  %% -> {ok, Ref, "printer-1.local"} if "printer.local" was taken but
+  %%    "printer-1.local" wasn't - deliberately not the "just append (2)
+  %%    forever" approach some minimal implementations fall back to;
+  %%    Fun decides the naming scheme.
+  ```
+
+  An ongoing conflict on a `{rename, Fun}` registration behaves like
+  `error` (withdraw + notify) - it doesn't automatically re-probe and
+  rename on its own while running; react to `{mdns_bridge_conflict, Ref,
+  Name}` and call `register/2,3` again if you want that.
+
+To skip probing entirely and claim a name immediately (today's original
+"trust the caller" behavior, no ~750ms wait), pass `#{probe => false}` -
+ongoing conflict defense still applies once registered either way.
+
+One simplification worth knowing about: RFC 6762 8.2 covers two hosts
+probing the *identical* name at the *identical* instant, resolved by a
+lexicographic comparison of the two proposed records so one host wins
+and the other backs off. This is treated as a plain conflict here (falls
+through to whatever `on_conflict` says) rather than implementing that
+comparison - the case is rare enough that the simplification is worth it.
+
+Ongoing conflict defense is scoped to `{Name, Type}` as a whole, not to
+an individual registration - if two different registrations legitimately
+share a name (round-robin), a conflicting third party causes *all*
+registrations under that name to be withdrawn together if defense has to
+give up, since there's no way to tell "an outside squatter" from "our
+own other registration" apart from the data already being one of our own
+values.
 
 Configuration
 -------------
@@ -220,6 +272,8 @@ See `config/sys.config`:
   registered name, so caches elsewhere on the network stay fresh.
 - `cache_max_entries` - cap on distinct records learned from the
   network; oldest entries are evicted once over it.
+- `max_rename_attempts` - cap on retries for `on_conflict => {rename,
+  Fun}` before giving up with `{error, {name_conflict, _, _}}`.
 
 Network interface changes
 --------------------------
@@ -258,6 +312,13 @@ Security considerations
 - **`mdns:register/2,3` has no authorization.** Any Erlang code running
   on the same node can publish, or take over, any name. Don't expose the
   node via unrestricted distributed Erlang to untrusted peers.
+- **Probing and ongoing defense are themselves unauthenticated**, like
+  everything else in mDNS: anyone on the local segment can answer a probe
+  (blocking a registration under the default `on_conflict => error`) or
+  keep asserting a conflicting record (forcing repeated defense/give-up
+  cycles). `on_conflict => force` sidesteps this for a name you're
+  confident should always be yours, at the cost of no longer backing off
+  from a real conflict either.
 - **Network changes aren't detected automatically.** See
   [Network interface changes](#network-interface-changes) above.
 

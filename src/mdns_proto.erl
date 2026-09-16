@@ -13,7 +13,9 @@
     is_local/1,
     mdns_query/2,
     mdns_answer/3,
+    probe_query/4,
     extract_answers/1,
+    extract_watched_records/1,
     dns_response/4
 ]).
 
@@ -67,11 +69,35 @@ mdns_answer(Name, Type, Answers) ->
     ],
     #dns_rec{header = Header, qdlist = [], anlist = AnList, nslist = [], arlist = []}.
 
+%% Build an RFC 6762 8.1 probe query: a question for Type records of Name,
+%% with the record we intend to claim placed in the Authority section (not
+%% Answer) so another simultaneous prober can see what we're proposing.
+%% Never fed into the passive cache - see extract_watched_records/1.
+-spec probe_query(string(), atom(), term(), non_neg_integer()) -> #dns_rec{}.
+probe_query(Name, Type, Data, Ttl) ->
+    Header = #dns_header{id = 0, qr = 0, opcode = 0, rd = 0},
+    Query = #dns_query{domain = Name, type = Type, class = ?CLASS_IN, unicast_response = false},
+    Proposed = #dns_rr{domain = Name, type = Type, class = ?CLASS_IN, ttl = Ttl, data = Data},
+    #dns_rec{header = Header, qdlist = [Query], anlist = [], nslist = [Proposed], arlist = []}.
+
 %% Pull out {Name, Type, Data, Ttl, CacheFlush} tuples for every answer
 %% (answer + additional section) we're prepared to cache: class IN only.
 -spec extract_answers(#dns_rec{}) ->
     [{string(), atom(), term(), non_neg_integer(), boolean()}].
 extract_answers(#dns_rec{anlist = An, arlist = Ar}) ->
+    extract_records(An ++ Ar).
+
+%% Like extract_answers/1, but also includes the Authority section - where
+%% RFC 6762 puts a prober's tentatively-claimed records. Used only for
+%% probe/conflict watching (mdns_socket); these are proposals, not
+%% confirmed data, so they must never be fed into the passive cache the
+%% way extract_answers/1's result is.
+-spec extract_watched_records(#dns_rec{}) ->
+    [{string(), atom(), term(), non_neg_integer(), boolean()}].
+extract_watched_records(#dns_rec{anlist = An, arlist = Ar, nslist = Ns}) ->
+    extract_records(An ++ Ar ++ Ns).
+
+extract_records(RRs) ->
     [
         {normalize_name(Domain), Type, Data, Ttl, CacheFlush}
      || #dns_rr{
@@ -81,7 +107,7 @@ extract_answers(#dns_rec{anlist = An, arlist = Ar}) ->
             data = Data,
             ttl = Ttl,
             func = CacheFlush
-        } <- An ++ Ar,
+        } <- RRs,
         Class =:= ?CLASS_IN
     ].
 
