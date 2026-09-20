@@ -28,6 +28,13 @@ max_entries_test_() ->
         [fun oldest_entries_are_evicted_past_the_cap/0]
     end}.
 
+%% Own fixture (a fresh, empty table) - print/1's job is just "don't
+%% crash and don't lose data", regardless of what's sharing the table.
+print_test_() ->
+    {setup, fun start/0, fun stop/1, fun(_) ->
+        [fun print_handles_every_record_shape_seen_on_a_real_lan/0]
+    end}.
+
 start() ->
     {ok, Pid} = mdns_cache:start_link(),
     Pid.
@@ -91,6 +98,59 @@ cache_flush_keeps_same_batch_entries() ->
         {"f.local", a, {10, 0, 0, 21}, 120, true}
     ]),
     ?assertEqual(2, length(mdns_cache:lookup("f.local", a))).
+
+%% Real mDNS traffic includes shapes beyond the plain-A-record case every
+%% other test here uses: raw/opaque binaries for record types this app
+%% doesn't specifically decode, numeric (not atom) type codes, PTR/TXT
+%% string data, the "single empty string" TXT quirk, and SRV/AAAA tuples
+%% of various arities - all seen on a real LAN (anonymized: none of this
+%% is real device/network data). print/1 must handle all of it without
+%% crashing or silently dropping anything.
+print_handles_every_record_shape_seen_on_a_real_lan() ->
+    Entries = [
+        {"printer1._http._tcp.local", 47, <<193, 59, 0, 5, 0, 0, 128, 0, 64>>, 59, false},
+        {"_http._tcp.local", ptr, "printer1._http._tcp.local", 4125, false},
+        {"_services._dns-sd._udp.local", ptr, "_http._tcp.local", 4125, false},
+        {"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.local", a, {10, 0, 0, 50}, 3937, false},
+        {"host1.local", aaaa, {65152, 0, 0, 0, 1, 2, 3, 4}, 1394, false},
+        {"70-35-60-63\\.1 device2._sleep-proxy._udp.local", srv, {0, 0, 61264, "Device2.local"},
+            3660, false},
+        {"70-35-60-63\\.1 device2._sleep-proxy._udp.local", txt, [[]], 3660, false},
+        {"host3._device-info._tcp.local", txt, ["model=SomeModel,1@ECOLOR=111,111,111"], 1703,
+            false},
+        {"50.0.0.10.in-addr.arpa", ptr, "host4.local", 1397, false},
+        {"1.2.3.4.5.6.7.8.9.0.a.b.c.d.e.f.0.0.0.0.0.0.0.0.0.0.0.0.0.8.e.f.ip6.arpa", ptr,
+            "host1.local", 1397, false}
+    ],
+    ok = mdns_cache:insert_many(Entries),
+    Path = "mdns_cache_print_test_" ++ integer_to_list(erlang:unique_integer([positive])),
+    {ok, F} = file:open(Path, [write]),
+    ok = mdns_cache:print(F),
+    ok = file:close(F),
+    {ok, Bin} = file:read_file(Path),
+    ok = file:delete(Path),
+    Text = binary_to_list(Bin),
+    %% Not asserting a strict line count: io:format's ~p pretty-printer
+    %% wraps a wide term (a multi-element tuple, a long binary) across
+    %% several lines, so "one line per entry" doesn't hold in general -
+    %% what matters is that every entry's data made it into the output
+    %% intact, nothing crashed, and the summary count is right.
+    Needles = [
+        "printer1._http._tcp.local",
+        "193,59",
+        "0,5,0,0,128,0,64",
+        "10,0,0,50",
+        "65152",
+        "61264",
+        "Device2.local",
+        "[[]]",
+        "model=SomeModel,1@ECOLOR=111,111,111",
+        "host4.local",
+        "1.2.3.4.5.6.7.8.9.0.a.b.c.d.e.f.0.0.0.0.0.0.0.0.0.0.0.0.0.8.e.f.ip6.arpa",
+        integer_to_list(length(Entries)) ++ " entries"
+    ],
+    [?assert(string:find(Text, Needle) =/= nomatch) || Needle <- Needles],
+    ok.
 
 oldest_entries_are_evicted_past_the_cap() ->
     ok = mdns_cache:insert_many([{"g1.local", a, {1, 1, 1, 1}, 120, false}]),

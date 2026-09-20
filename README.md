@@ -95,11 +95,15 @@ Inspecting the cache
 
 `mdns_cache:dump/0` returns every current, unexpired entry as a list of
 maps (`#{name, type, data, ttl_remaining, age}`); `mdns_cache:print/0`
-formats that to stdout - handy from `rebar3 shell`:
+formats that to an `io:device()` (default `standard_io`; `print/1` takes
+one explicitly) - handy from `rebar3 shell`. Columns are ragged, not
+fixed-width, on purpose - a fixed field width would silently truncate a
+long name (a reverse-DNS PTR query, a DNS-SD instance name - both common
+on a real network) rather than just misalign it:
 
     1> mdns_cache:print().
-    my-printer.local                         a      ttl=118    age=2      {192,168,1,42}
-    _http._tcp.local                         ptr    ttl=4498   age=2      "my printer._http._tcp.local"
+    my-printer.local a ttl=118 age=2 {192,168,1,42}
+    _http._tcp.local ptr ttl=4498 age=2 "my printer._http._tcp.local"
     2 entries
 
 Cache inserts, removals (goodbye packets, RFC 6762 10.2 cache-flush

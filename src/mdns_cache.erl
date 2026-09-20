@@ -38,7 +38,8 @@
     await_subscribe/2,
     await_unsubscribe/2,
     dump/0,
-    print/0
+    print/0,
+    print/1
 ]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
@@ -134,10 +135,26 @@ dump() ->
         ExpiresAt > Now
     ].
 
-%% Prints dump/0's result to stdout, one line per entry, sorted by
-%% {Name, Type} for readability.
+%% Equivalent to print(standard_io).
 -spec print() -> ok.
 print() ->
+    print(standard_io).
+
+%% Prints dump/0's result to IoDevice, one line per entry, sorted by
+%% {Name, Type} for readability. Data is whatever shape that record type
+%% happens to use (a tuple for a/aaaa/srv, a string or list of strings
+%% for ptr/txt, a raw binary for anything this app doesn't specifically
+%% understand) - printed with ~p either way, so nothing here is
+%% type-specific enough to need a Type-keyed formatting table.
+%%
+%% Deliberately no fixed-width columns: io_lib's ~s/~w *truncate* (to a
+%% row of `*`s, for ~w) a value wider than its given field width rather
+%% than just leaving it unaligned - real names on a real network (a
+%% reverse-DNS PTR query, a DNS-SD instance name) regularly are, and
+%% silently losing part of a name defeats the entire point of a
+%% debugging tool. Ragged columns beat truncated data.
+-spec print(io:device()) -> ok.
+print(IoDevice) ->
     Entries = lists:sort(
         fun(#{name := N1, type := T1}, #{name := N2, type := T2}) ->
             {N1, T1} =< {N2, T2}
@@ -145,11 +162,11 @@ print() ->
         dump()
     ),
     [
-        io:format("~-40s ~-6w ttl=~-6w age=~-6w ~p~n", [Name, Type, Ttl, Age, Data])
+        io:format(IoDevice, "~s ~w ttl=~w age=~w ~p~n", [Name, Type, Ttl, Age, Data])
      || #{name := Name, type := Type, data := Data, ttl_remaining := Ttl, age := Age} <-
             Entries
     ],
-    io:format("~p entries~n", [length(Entries)]).
+    io:format(IoDevice, "~p entries~n", [length(Entries)]).
 
 init([]) ->
     ets:new(?TAB, [set, public, named_table, {read_concurrency, true}]),
