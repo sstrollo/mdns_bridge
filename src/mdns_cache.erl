@@ -336,18 +336,17 @@ enforce_max_entries() ->
             ok
     end.
 
+%% Projects straight to {InsertedAt, Key} pairs via a match spec, rather
+%% than copying every full row out with tab2list/1 just to pick the
+%% InsertedAt back out of each one - and sorting {InsertedAt, Key} tuples
+%% needs no comparator function, since standard term order already
+%% compares them InsertedAt-first.
 evict_oldest(N) ->
-    Rows = ets:tab2list(?TAB),
-    Sorted = lists:sort(
-        fun({_, {_, InsertedAt1}}, {_, {_, InsertedAt2}}) ->
-            InsertedAt1 =< InsertedAt2
-        end,
-        Rows
-    ),
-    ToEvict = lists:sublist(Sorted, N),
-    [ets:delete(?TAB, Key) || {Key, _Value} <- ToEvict],
+    ByAge = ets:select(?TAB, [{{'$1', {'_', '$2'}}, [], [{{'$2', '$1'}}]}]),
+    ToEvict = lists:sublist(lists:sort(ByAge), N),
+    [ets:delete(?TAB, Key) || {_InsertedAt, Key} <- ToEvict],
     logger:debug("mdns_cache: evicted ~p oldest entr(ies) (over cache_max_entries): ~p", [
-        N, [Key || {Key, _Value} <- ToEvict]
+        N, [Key || {_InsertedAt, Key} <- ToEvict]
     ]),
     ok.
 

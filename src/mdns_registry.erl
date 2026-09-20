@@ -289,7 +289,14 @@ handle_info({reannounce_one, Key}, State) ->
     reannounce(Key),
     {noreply, State};
 handle_info(reannounce_all, State) ->
-    [reannounce(Key) || {Key, _Entry} <- ets:tab2list(?TAB)],
+    ets:foldl(
+        fun({Key, _Entry}, ok) ->
+            reannounce(Key),
+            ok
+        end,
+        ok,
+        ?TAB
+    ),
     schedule_reannounce_all(),
     {noreply, State};
 handle_info(_Msg, State) ->
