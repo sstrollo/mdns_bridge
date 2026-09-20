@@ -103,7 +103,7 @@ on a real network) rather than just misalign it:
 
     1> mdns_cache:print().
     my-printer.local a ttl=118 age=2 {192,168,1,42}
-    _http._tcp.local ptr ttl=4498 age=2 "my printer._http._tcp.local"
+    _http._tcp.local ptr ttl=4498 age=2 <<"my printer._http._tcp.local">>
     2 entries
 
 Cache inserts, removals (goodbye packets, RFC 6762 10.2 cache-flush
@@ -215,8 +215,9 @@ By default this probes for a conflict first (RFC 6762 section 8: three
 probe queries, 250ms apart, so this call typically takes at least
 ~750ms) before claiming the name, and keeps defending it against a
 conflicting claim for as long as it's registered (RFC 6762 section 9).
-`FinalName` is the name actually claimed - normally the same as what you
-passed, but see `auto`/`{rename, Fun}` below for when it isn't.
+`FinalName` (a binary) is the name actually claimed - normally the same
+as what you passed, but see `auto`/`{rename, Fun}` below for when it
+isn't.
 
 The registration is tied to the calling process: if it exits without
 calling `unregister/1`, the name is withdrawn automatically (a goodbye
@@ -261,7 +262,7 @@ during the initial probe and later while the name is held:
 
   ```erlang
   mdns:register("printer.local", Ip, #{on_conflict => auto}).
-  %% -> {ok, Ref, "printer-1.local"} if "printer.local" was taken but
+  %% -> {ok, Ref, <<"printer-1.local">>} if "printer.local" was taken but
   %%    "printer-1.local" wasn't - deliberately not the "just append (2)
   %%    forever, no rhyme or reason" approach some minimal implementations
   %%    fall back to.
@@ -269,19 +270,20 @@ during the initial probe and later while the name is held:
 
 - `{rename, Fun}` - like `auto`, but you supply the naming scheme: probe
   time only, calls `Fun(OriginalName, Attempt)` (always the *original*
-  name passed to `register/2,3`, 1-based `Attempt`) for a new name to
-  try, and probes that one, up to `max_rename_attempts` tries. `Fun` is
-  responsible for returning something that's still a valid `.local` name
-  itself - `auto` is equivalent to:
+  name passed to `register/2,3`, as a binary - not the previous
+  attempt's, and 1-based `Attempt`) for a new name to try, and probes
+  that one, up to `max_rename_attempts` tries. `Fun` is responsible for
+  returning something that's still a valid `.local` name itself (a
+  `string()` or `binary()`, either is fine) - `auto` is equivalent to:
 
   ```erlang
   fun(Name, Attempt) ->
-      Base =
-          case lists:suffix(".local", Name) of
-              true -> lists:sublist(Name, length(Name) - length(".local"));
-              false -> Name
+      {Base, Suffix} =
+          case Name of
+              <<Base0:(byte_size(Name) - 6)/binary, ".local">> -> {Base0, <<".local">>};
+              _ -> {Name, <<>>}
           end,
-      Base ++ "-" ++ integer_to_list(Attempt) ++ ".local"
+      <<Base/binary, "-", (integer_to_binary(Attempt))/binary, Suffix/binary>>
   end
   ```
 
@@ -321,7 +323,7 @@ reference:
 {ok, Ref, FinalName} = mdns:register_service(
     "My Printer", "_http._tcp", 8080, [{"path", "/"}], "printer-host.local"
 ),
-%% FinalName = "my printer._http._tcp.local"
+%% FinalName = <<"my printer._http._tcp.local">>
 %% ... later ...
 ok = mdns:unregister(Ref).
 ```

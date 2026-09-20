@@ -5,21 +5,21 @@
 
 normalize_name_test_() ->
     [
-        ?_assertEqual("foo.local", mdns_proto:normalize_name("Foo.Local")),
-        ?_assertEqual("foo.local", mdns_proto:normalize_name("foo.local.")),
-        ?_assertEqual("foo.local", mdns_proto:normalize_name(<<"FOO.LOCAL">>))
+        ?_assertEqual(<<"foo.local">>, mdns_proto:normalize_name("Foo.Local")),
+        ?_assertEqual(<<"foo.local">>, mdns_proto:normalize_name("foo.local.")),
+        ?_assertEqual(<<"foo.local">>, mdns_proto:normalize_name(<<"FOO.LOCAL">>))
     ].
 
 is_local_test_() ->
     [
-        ?_assert(mdns_proto:is_local("foo.local")),
-        ?_assert(mdns_proto:is_local("local")),
-        ?_assertNot(mdns_proto:is_local("example.com")),
-        ?_assertNot(mdns_proto:is_local("notlocal"))
+        ?_assert(mdns_proto:is_local(<<"foo.local">>)),
+        ?_assert(mdns_proto:is_local(<<"local">>)),
+        ?_assertNot(mdns_proto:is_local(<<"example.com">>)),
+        ?_assertNot(mdns_proto:is_local(<<"notlocal">>))
     ].
 
 mdns_answer_test() ->
-    Rec = mdns_proto:mdns_answer("widget.local", a, [{{10, 0, 0, 1}, 120}]),
+    Rec = mdns_proto:mdns_answer(<<"widget.local">>, a, [{{10, 0, 0, 1}, 120}]),
     ?assertEqual(1, (Rec#dns_rec.header)#dns_header.qr),
     ?assertEqual(1, (Rec#dns_rec.header)#dns_header.aa),
     ?assertEqual([], Rec#dns_rec.qdlist),
@@ -29,7 +29,7 @@ mdns_answer_test() ->
     ).
 
 round_trip_mdns_answer_test() ->
-    Rec = mdns_proto:mdns_answer("widget.local", a, [{{10, 0, 0, 1}, 120}]),
+    Rec = mdns_proto:mdns_answer(<<"widget.local">>, a, [{{10, 0, 0, 1}, 120}]),
     Bin = inet_dns:encode(Rec, true),
     {ok, Decoded} = inet_dns:decode(Bin, true),
     ?assertMatch(
@@ -38,7 +38,7 @@ round_trip_mdns_answer_test() ->
     ).
 
 mdns_query_test() ->
-    Rec = mdns_proto:mdns_query("widget.local", a),
+    Rec = mdns_proto:mdns_query(<<"widget.local">>, a),
     ?assertMatch(#dns_rec{qdlist = [#dns_query{domain = "widget.local", type = a}]}, Rec),
     [Q] = Rec#dns_rec.qdlist,
     ?assertNot(Q#dns_query.unicast_response).
@@ -67,7 +67,7 @@ extract_answers_test() ->
         arlist = [RrOther]
     },
     ?assertEqual(
-        [{"widget.local", a, {10, 0, 0, 1}, 120, true}],
+        [{<<"widget.local">>, a, {10, 0, 0, 1}, 120, true}],
         mdns_proto:extract_answers(Rec)
     ).
 
@@ -92,7 +92,7 @@ dns_response_answers_test() ->
 %% OTP release ever changes inet_dns's internal record layout, this is
 %% what will actually catch it.
 round_trip_mdns_query_test() ->
-    Rec = mdns_proto:mdns_query("widget.local", a),
+    Rec = mdns_proto:mdns_query(<<"widget.local">>, a),
     Bin = inet_dns:encode(Rec, true),
     {ok, Decoded} = inet_dns:decode(Bin, true),
     ?assertMatch(#dns_rec{qdlist = [#dns_query{domain = "widget.local", type = a}]}, Decoded).
@@ -107,6 +107,10 @@ round_trip_dns_response_test() ->
         Decoded#dns_rec.anlist
     ).
 
+%% dns_response/4's Domain comes straight from the request's own
+%% (decoded, so already a list) question section - this helper builds
+%% that request directly rather than through mdns_proto:mdns_query/2, so
+%% it stays a plain string like a real decoded packet would be.
 request(Name, Type) ->
     #dns_rec{
         header = #dns_header{id = 42, rd = true},
@@ -115,25 +119,25 @@ request(Name, Type) ->
 
 escape_label_test_() ->
     [
-        ?_assertEqual("plain", mdns_proto:escape_label("plain")),
-        ?_assertEqual("my\\.printer", mdns_proto:escape_label("my.printer")),
-        ?_assertEqual("back\\\\slash", mdns_proto:escape_label("back\\slash")),
+        ?_assertEqual(<<"plain">>, mdns_proto:escape_label("plain")),
+        ?_assertEqual(<<"my\\.printer">>, mdns_proto:escape_label("my.printer")),
+        ?_assertEqual(<<"back\\\\slash">>, mdns_proto:escape_label("back\\slash")),
         ?_assertEqual(
-            "both\\\\and\\.dot", mdns_proto:escape_label("both\\and.dot")
+            <<"both\\\\and\\.dot">>, mdns_proto:escape_label("both\\and.dot")
         )
     ].
 
 service_type_name_test() ->
-    ?assertEqual("_http._tcp.local", mdns_proto:service_type_name("_http._tcp")).
+    ?assertEqual(<<"_http._tcp.local">>, mdns_proto:service_type_name("_http._tcp")).
 
 service_instance_name_test_() ->
     [
         ?_assertEqual(
-            "my printer._http._tcp.local",
+            <<"my printer._http._tcp.local">>,
             mdns_proto:service_instance_name("My Printer", "_http._tcp")
         ),
         ?_assertEqual(
-            "my\\.printer._http._tcp.local",
+            <<"my\\.printer._http._tcp.local">>,
             mdns_proto:service_instance_name("My.Printer", "_http._tcp")
         )
     ].
@@ -141,21 +145,25 @@ service_instance_name_test_() ->
 %% Round-trip a service instance name containing a literal "." through
 %% the real inet_dns encoder/decoder - the whole reason escape_label/1
 %% exists is to survive exactly this, not just look right as a string.
+%% Decoded#dns_rec's domain is always a plain list (that's inet_dns's
+%% own wire-decode shape - see mdns_proto's moduledoc), so it's
+%% normalize_name/1'd back to binary before comparing against Name.
 round_trip_escaped_instance_name_test() ->
     Name = mdns_proto:service_instance_name("3.5\" Drive", "_http._tcp"),
-    Rec = mdns_proto:mdns_answer(Name, ptr, [{"target.local", 4500}]),
+    Rec = mdns_proto:mdns_answer(Name, ptr, [{<<"target.local">>, 4500}]),
     Bin = inet_dns:encode(Rec, true),
     {ok, Decoded} = inet_dns:decode(Bin, true),
-    ?assertMatch([#dns_rr{domain = Name}], Decoded#dns_rec.anlist).
+    [#dns_rr{domain = DecodedDomain}] = Decoded#dns_rec.anlist,
+    ?assertEqual(Name, mdns_proto:normalize_name(DecodedDomain)).
 
 build_txt_data_test_() ->
     [
-        ?_assertEqual([""], mdns_proto:build_txt_data([])),
-        ?_assertEqual(["path=/"], mdns_proto:build_txt_data([{"path", "/"}])),
+        ?_assertEqual([<<>>], mdns_proto:build_txt_data([])),
+        ?_assertEqual([<<"path=/">>], mdns_proto:build_txt_data([{"path", "/"}])),
         ?_assertEqual(
-            ["path=/", "flag"], mdns_proto:build_txt_data([{"path", "/"}, "flag"])
+            [<<"path=/">>, <<"flag">>], mdns_proto:build_txt_data([{"path", "/"}, "flag"])
         ),
         ?_assertEqual(
-            ["a=1"], mdns_proto:build_txt_data([{<<"a">>, <<"1">>}])
+            [<<"a=1">>], mdns_proto:build_txt_data([{<<"a">>, <<"1">>}])
         )
     ].

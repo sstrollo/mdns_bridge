@@ -45,10 +45,10 @@
 %% (claim/keep it regardless), `{rename, Fun}` (probe-time only: call
 %% `Fun(OriginalName, Attempt)` for a new name and retry, up to
 %% max_rename_attempts - always the *original* name, not the previous
-%% attempt's, so a plain `Name ++ "-" ++ integer_to_list(Attempt)` Fun
-%% produces "foo-1", "foo-2", ... rather than compounding into
-%% "foo-1-2-3"; for a service, `Name` is the plain instance label, not
-%% the full dotted name), or `auto` (shorthand for exactly that Fun).
+%% attempt's, so a plain "append -Attempt" Fun produces "foo-1", "foo-2",
+%% ... rather than compounding into "foo-1-2-3"; for a service, `Name` is
+%% the plain instance label, not the full dotted name), or `auto`
+%% (shorthand for exactly that Fun).
 %%
 %% DNS-SD service registration publishes, atomically under one
 %% reference: a SRV + TXT record at the instance name (RFC 6763 4.1,
@@ -93,7 +93,7 @@
 -define(DEFAULT_MAX_RENAME_ATTEMPTS, 10).
 -define(KNOWN_OPTS, [validate, probe, on_conflict]).
 -define(KNOWN_SERVICE_OPTS, [probe, on_conflict]).
--define(META_SERVICE_NAME, "_services._dns-sd._udp.local").
+-define(META_SERVICE_NAME, <<"_services._dns-sd._udp.local">>).
 
 %% RFC 6762 8.1: three probes, 250ms apart, preceded by a random 0-249ms
 %% delay (spreads out synchronized probing after e.g. a mass power-on).
@@ -115,13 +115,13 @@
 ).
 -define(is_port_number(P), (is_integer(P) andalso P >= 0 andalso P =< 65535)).
 
--type key() :: {string(), atom(), term()}.
+-type key() :: {binary(), atom(), term()}.
 %% reference() -> what to withdraw when this registration goes away:
 %% a plain host (one key) or a service (several keys sharing one
 %% reference count contribution towards the meta-enumeration PTR).
 -type registration() ::
     {host, key(), pid()}
-    | {service, [key()], ServiceTypeName :: string(), pid()}.
+    | {service, [key()], ServiceTypeName :: binary(), pid()}.
 
 -record(state, {
     iface_ip :: inet:ip4_address(),
@@ -129,18 +129,18 @@
     monitors = #{} :: #{reference() => registration()},
     %% {Name, Type} -> monotonic ms of the last time we defended it -
     %% RFC 6762 section 9 ongoing conflict defense.
-    defenses = #{} :: #{{string(), atom()} => integer()},
+    defenses = #{} :: #{{binary(), atom()} => integer()},
     %% ServiceTypeName -> count of live service registrations of that
     %% type, so the shared meta-enumeration PTR is only withdrawn once
     %% nothing references it anymore.
-    meta_ptr_refs = #{} :: #{string() => pos_integer()}
+    meta_ptr_refs = #{} :: #{binary() => pos_integer()}
 }).
 
 -type on_conflict() ::
     error
     | force
     | auto
-    | {rename, fun((string(), pos_integer()) -> string() | binary())}.
+    | {rename, fun((string() | binary(), pos_integer()) -> string() | binary())}.
 -type opts() :: #{validate => boolean(), probe => boolean(), on_conflict => on_conflict()}.
 -type service_opts() :: #{probe => boolean(), on_conflict => on_conflict()}.
 
@@ -151,12 +151,12 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 -spec register(string() | binary(), inet:ip4_address()) ->
-    {ok, reference(), string()} | {error, term()}.
+    {ok, reference(), binary()} | {error, term()}.
 register(Name, Ip) ->
     register(Name, Ip, #{}).
 
 -spec register(string() | binary(), inet:ip4_address(), opts()) ->
-    {ok, reference(), string()} | {error, term()}.
+    {ok, reference(), binary()} | {error, term()}.
 register(Name, Ip, Opts) when is_map(Opts) ->
     %% Validated here, in the caller's own process: a malformed Opts must
     %% never reach the gen_server as a bad message, since a crash there
@@ -176,7 +176,7 @@ register(Name, Ip, Opts) when is_map(Opts) ->
     non_neg_integer(),
     [{iodata(), iodata()} | iodata()],
     string() | binary()
-) -> {ok, reference(), string()} | {error, term()}.
+) -> {ok, reference(), binary()} | {error, term()}.
 register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost) ->
     register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost, #{}).
 
@@ -187,7 +187,7 @@ register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost) ->
     [{iodata(), iodata()} | iodata()],
     string() | binary(),
     service_opts()
-) -> {ok, reference(), string()} | {error, term()}.
+) -> {ok, reference(), binary()} | {error, term()}.
 register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost, Opts) when is_map(Opts) ->
     case validate_opts(Opts, ?KNOWN_SERVICE_OPTS, [probe]) of
         {error, _} = Err ->
@@ -214,7 +214,7 @@ unregister(Ref) ->
     gen_server:call(?SERVER, {unregister, Ref}).
 
 %% Direct ETS read: current {Data, Ttl} answers for a published Name/Type.
--spec answers_for(string(), atom()) -> [{term(), non_neg_integer()}].
+-spec answers_for(binary(), atom()) -> [{term(), non_neg_integer()}].
 answers_for(Name, Type) ->
     [
         {Data, Ttl}
@@ -223,7 +223,7 @@ answers_for(Name, Type) ->
 
 %% mdns_socket calls this (RFC 6762 section 9) when it sees an answer for
 %% Name/Type whose Data doesn't match any of our own current values.
--spec notify_conflict(string(), atom(), term()) -> ok.
+-spec notify_conflict(binary(), atom(), term()) -> ok.
 notify_conflict(Name, Type, Data) ->
     gen_server:cast(?SERVER, {conflict, Name, Type, Data}).
 
@@ -434,15 +434,24 @@ resolve_conflict_policy(OriginalName, CandidateName, Opts, Attempt, Reason, Comm
 resolve_on_conflict(auto) -> {rename, fun default_rename_fun/2};
 resolve_on_conflict(OnConflict) -> OnConflict.
 
-default_rename_fun(Name, Attempt) ->
-    {Base, Suffix} = split_local_suffix(Name),
-    Base ++ "-" ++ integer_to_list(Attempt) ++ Suffix.
+default_rename_fun(Name0, Attempt) ->
+    {Base, Suffix} = split_local_suffix(to_binary(Name0)),
+    <<Base/binary, "-", (integer_to_binary(Attempt))/binary, Suffix/binary>>.
 
 split_local_suffix(Name) ->
-    case lists:suffix(".local", Name) of
-        true -> {lists:sublist(Name, length(Name) - length(".local")), ".local"};
-        false -> {Name, ""}
+    Suffix = <<".local">>,
+    SuffixSize = byte_size(Suffix),
+    NameSize = byte_size(Name),
+    case
+        NameSize >= SuffixSize andalso
+            binary:part(Name, NameSize - SuffixSize, SuffixSize) =:= Suffix
+    of
+        true -> {binary:part(Name, 0, NameSize - SuffixSize), Suffix};
+        false -> {Name, <<>>}
     end.
+
+to_binary(S) when is_binary(S) -> S;
+to_binary(S) when is_list(S) -> unicode:characters_to_binary(S).
 
 rename_via(Fun, Name, Attempt) ->
     try Fun(Name, Attempt) of

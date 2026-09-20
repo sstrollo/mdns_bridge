@@ -57,9 +57,17 @@ start() ->
 stop(Pids) ->
     [gen_server:stop(Pid) || Pid <- lists:reverse(Pids)].
 
+%% Cache entries here use the same shapes mdns_proto:extract_records/1
+%% would actually produce from real traffic: binary Name, and (via
+%% from_wire_data/2) binary PTR/SRV domain-shaped data too - see
+%% mdns_proto's moduledoc. dns_response/4 converts PTR/SRV data back to
+%% a wire-shaped list via to_wire_data/2 before it reaches the response
+%% record, so those two assertions stay list literals; TXT isn't
+%% converted on the way out (inet_dns accepts binaries for TXT directly
+%% at encode time), so that one stays binary.
 resolves_ptr_from_cache() ->
     ok = mdns_cache:insert_many([
-        {"_http._tcp.local", ptr, "My Printer._http._tcp.local", 4500, false}
+        {<<"_http._tcp.local">>, ptr, <<"My Printer._http._tcp.local">>, 4500, false}
     ]),
     Req = request("_http._tcp.local", ptr),
     Resp = mdns_dns_server:build_response(Req, hd(Req#dns_rec.qdlist)),
@@ -71,7 +79,7 @@ resolves_ptr_from_cache() ->
 
 resolves_srv_from_cache() ->
     ok = mdns_cache:insert_many([
-        {"my-printer._http._tcp.local", srv, {0, 0, 631, "printerhost.local"}, 120, false}
+        {<<"my-printer._http._tcp.local">>, srv, {0, 0, 631, <<"printerhost.local">>}, 120, false}
     ]),
     Req = request("my-printer._http._tcp.local", srv),
     Resp = mdns_dns_server:build_response(Req, hd(Req#dns_rec.qdlist)),
@@ -83,9 +91,9 @@ resolves_srv_from_cache() ->
 
 resolves_txt_from_cache() ->
     ok = mdns_cache:insert_many([
-        {"my-printer._http._tcp.local", txt, ["path=/"], 120, false}
+        {<<"my-printer._http._tcp.local">>, txt, [<<"path=/">>], 120, false}
     ]),
     Req = request("my-printer._http._tcp.local", txt),
     Resp = mdns_dns_server:build_response(Req, hd(Req#dns_rec.qdlist)),
     ?assertEqual(0, (Resp#dns_rec.header)#dns_header.rcode),
-    ?assertMatch([#dns_rr{type = txt, data = ["path=/"]}], Resp#dns_rec.anlist).
+    ?assertMatch([#dns_rr{type = txt, data = [<<"path=/">>]}], Resp#dns_rec.anlist).

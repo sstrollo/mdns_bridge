@@ -56,18 +56,18 @@ child_spec() ->
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
--spec send_query(string(), atom()) -> ok.
+-spec send_query(binary(), atom()) -> ok.
 send_query(Name, Type) ->
     gen_server:cast(?SERVER, {send_query, Name, Type}).
 
 %% Multicast an mDNS answer for Name/Type: an announce, a reactive
 %% response, or (with a Ttl of 0 in Answers) a goodbye.
--spec announce(string(), atom(), [{term(), non_neg_integer()}]) -> ok.
+-spec announce(binary(), atom(), [{term(), non_neg_integer()}]) -> ok.
 announce(Name, Type, Answers) ->
     gen_server:cast(?SERVER, {announce, Name, Type, Answers}).
 
 %% Multicast an RFC 6762 8.1 probe for Name/Type/Data.
--spec send_probe(string(), atom(), term(), non_neg_integer()) -> ok.
+-spec send_probe(binary(), atom(), term(), non_neg_integer()) -> ok.
 send_probe(Name, Type, Data, Ttl) ->
     gen_server:cast(?SERVER, {send_probe, Name, Type, Data, Ttl}).
 
@@ -83,11 +83,11 @@ send_probe(Name, Type, Data, Ttl) ->
 %% subscription has actually taken effect before it starts probing (and,
 %% for unsubscribe, that no further message can arrive) - the same
 %% synchronous guarantee direct ETS access used to give for free.
--spec probe_subscribe(string(), atom()) -> ok.
+-spec probe_subscribe(binary(), atom()) -> ok.
 probe_subscribe(Name, Type) ->
     gen_server:call(?SERVER, {probe_subscribe, Name, Type}).
 
--spec probe_unsubscribe(string(), atom()) -> ok.
+-spec probe_unsubscribe(binary(), atom()) -> ok.
 probe_unsubscribe(Name, Type) ->
     gen_server:call(?SERVER, {probe_unsubscribe, Name, Type}).
 

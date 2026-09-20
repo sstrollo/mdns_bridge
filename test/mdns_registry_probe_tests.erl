@@ -95,8 +95,8 @@ answer_as(S, Name, Type, Data) ->
 
 probes_and_claims_an_uncontested_name() ->
     Ip = sibling_ip(20),
-    {ok, Ref, "probe-clean.local"} = mdns:register("probe-clean.local", Ip),
-    ?assertMatch([{Ip, _}], mdns_registry:answers_for("probe-clean.local", a)),
+    {ok, Ref, <<"probe-clean.local">>} = mdns:register("probe-clean.local", Ip),
+    ?assertMatch([{Ip, _}], mdns_registry:answers_for(<<"probe-clean.local">>, a)),
     ok = mdns:unregister(Ref).
 
 conflict_fails_registration_by_default() ->
@@ -104,19 +104,19 @@ conflict_fails_registration_by_default() ->
     Other = sibling_ip(22),
     spawn_conflicting_responder("probe-conflict.local", a, Other),
     ?assertMatch(
-        {error, {name_conflict, "probe-conflict.local", Other}},
+        {error, {name_conflict, <<"probe-conflict.local">>, Other}},
         mdns:register("probe-conflict.local", Ip)
     ),
-    ?assertEqual([], mdns_registry:answers_for("probe-conflict.local", a)).
+    ?assertEqual([], mdns_registry:answers_for(<<"probe-conflict.local">>, a)).
 
 force_claims_despite_conflict() ->
     Ip = sibling_ip(23),
     Other = sibling_ip(24),
     spawn_conflicting_responder("probe-force.local", a, Other),
-    {ok, Ref, "probe-force.local"} = mdns:register("probe-force.local", Ip, #{
+    {ok, Ref, <<"probe-force.local">>} = mdns:register("probe-force.local", Ip, #{
         on_conflict => force
     }),
-    ?assertMatch([{Ip, _}], mdns_registry:answers_for("probe-force.local", a)),
+    ?assertMatch([{Ip, _}], mdns_registry:answers_for(<<"probe-force.local">>, a)),
     ok = mdns:unregister(Ref).
 
 rename_retries_under_a_new_name_until_uncontested() ->
@@ -128,9 +128,9 @@ rename_retries_under_a_new_name_until_uncontested() ->
     {ok, Ref, FinalName} = mdns:register("probe-rename.local", Ip, #{
         on_conflict => {rename, RenameFun}
     }),
-    ?assertEqual("probe-rename-1.local", FinalName),
+    ?assertEqual(<<"probe-rename-1.local">>, FinalName),
     ?assertMatch([{Ip, _}], mdns_registry:answers_for(FinalName, a)),
-    ?assertEqual([], mdns_registry:answers_for("probe-rename.local", a)),
+    ?assertEqual([], mdns_registry:answers_for(<<"probe-rename.local">>, a)),
     ok = mdns:unregister(Ref).
 
 auto_is_shorthand_for_appending_the_attempt_number() ->
@@ -138,7 +138,7 @@ auto_is_shorthand_for_appending_the_attempt_number() ->
     Other = sibling_ip(28),
     spawn_conflicting_responder("probe-auto.local", a, Other),
     {ok, Ref, FinalName} = mdns:register("probe-auto.local", Ip, #{on_conflict => auto}),
-    ?assertEqual("probe-auto-1.local", FinalName),
+    ?assertEqual(<<"probe-auto-1.local">>, FinalName),
     ?assertMatch([{Ip, _}], mdns_registry:answers_for(FinalName, a)),
     ok = mdns:unregister(Ref).
 
@@ -151,7 +151,7 @@ rename_does_not_compound_across_repeated_conflicts() ->
     spawn_conflicting_responder("probe-compound.local", a, Other),
     spawn_conflicting_responder("probe-compound-1.local", a, Other),
     {ok, Ref, FinalName} = mdns:register("probe-compound.local", Ip, #{on_conflict => auto}),
-    ?assertEqual("probe-compound-2.local", FinalName),
+    ?assertEqual(<<"probe-compound-2.local">>, FinalName),
     ?assertMatch([{Ip, _}], mdns_registry:answers_for(FinalName, a)),
     ok = mdns:unregister(Ref).
 
@@ -163,26 +163,34 @@ probes_and_claims_an_uncontested_service() ->
     ),
     ?assertEqual(mdns_proto:service_instance_name("Probe Clean", ServiceType), FinalName),
     ?assertMatch(
-        [{{0, 0, 8080, "probetarget.local"}, _}], mdns_registry:answers_for(FinalName, srv)
+        [{{0, 0, 8080, <<"probetarget.local">>}, _}], mdns_registry:answers_for(FinalName, srv)
     ),
-    ?assertMatch([{["path=/"], _}], mdns_registry:answers_for(FinalName, txt)),
+    ?assertMatch([{[<<"path=/">>], _}], mdns_registry:answers_for(FinalName, txt)),
     ?assertMatch([{FinalName, _}], mdns_registry:answers_for(ServiceTypeName, ptr)),
     ?assertMatch(
         [{ServiceTypeName, _}],
-        mdns_registry:answers_for("_services._dns-sd._udp.local", ptr)
+        mdns_registry:answers_for(<<"_services._dns-sd._udp.local">>, ptr)
     ),
     ok = mdns:unregister(Ref),
     ?assertEqual([], mdns_registry:answers_for(FinalName, srv)),
     ?assertEqual([], mdns_registry:answers_for(ServiceTypeName, ptr)),
-    ?assertEqual([], mdns_registry:answers_for("_services._dns-sd._udp.local", ptr)).
+    ?assertEqual([], mdns_registry:answers_for(<<"_services._dns-sd._udp.local">>, ptr)).
 
+%% spawn_conflicting_responder matches the *wire* packet's domain, which
+%% is always a plain list (decode/2's own shape - see mdns_proto's
+%% moduledoc) regardless of FullName's binary internal representation -
+%% hence characters_to_list here. OtherSrv/OtherTxt, similarly, are what
+%% the responder puts on the wire (list-shaped, like any raw dns_rr
+%% data); what our own code reports as the conflicting Data has already
+%% gone through mdns_proto:extract_watched_records/1's binary
+%% normalization, so the assertions expect the binary-converted form.
 srv_conflict_fails_registration_by_default() ->
     ServiceType = "_probesrvconflict._tcp",
     FullName = mdns_proto:service_instance_name("Probe Srv Conflict", ServiceType),
     OtherSrv = {0, 0, 9999, "othertarget.local"},
-    spawn_conflicting_responder(FullName, srv, OtherSrv),
+    spawn_conflicting_responder(unicode:characters_to_list(FullName), srv, OtherSrv),
     ?assertMatch(
-        {error, {name_conflict, FullName, {srv, OtherSrv}}},
+        {error, {name_conflict, FullName, {srv, {0, 0, 9999, <<"othertarget.local">>}}}},
         mdns:register_service("Probe Srv Conflict", ServiceType, 8080, [], "probetarget.local")
     ),
     ?assertEqual([], mdns_registry:answers_for(FullName, srv)).
@@ -191,9 +199,9 @@ txt_conflict_fails_registration_by_default() ->
     ServiceType = "_probetxtconflict._tcp",
     FullName = mdns_proto:service_instance_name("Probe Txt Conflict", ServiceType),
     OtherTxt = ["other=data"],
-    spawn_conflicting_responder(FullName, txt, OtherTxt),
+    spawn_conflicting_responder(unicode:characters_to_list(FullName), txt, OtherTxt),
     ?assertMatch(
-        {error, {name_conflict, FullName, {txt, OtherTxt}}},
+        {error, {name_conflict, FullName, {txt, [<<"other=data">>]}}},
         mdns:register_service("Probe Txt Conflict", ServiceType, 8080, [], "probetarget.local")
     ),
     %% Nothing commits until both SRV and TXT probes clear, so the
@@ -205,12 +213,12 @@ force_claims_service_despite_conflict() ->
     ServiceType = "_probeforce._tcp",
     FullName = mdns_proto:service_instance_name("Probe Force", ServiceType),
     OtherSrv = {0, 0, 9999, "othertarget.local"},
-    spawn_conflicting_responder(FullName, srv, OtherSrv),
+    spawn_conflicting_responder(unicode:characters_to_list(FullName), srv, OtherSrv),
     {ok, Ref, FullName} = mdns:register_service(
         "Probe Force", ServiceType, 8080, [], "probetarget.local", #{on_conflict => force}
     ),
     ?assertMatch(
-        [{{0, 0, 8080, "probetarget.local"}, _}], mdns_registry:answers_for(FullName, srv)
+        [{{0, 0, 8080, <<"probetarget.local">>}, _}], mdns_registry:answers_for(FullName, srv)
     ),
     ok = mdns:unregister(Ref).
 
@@ -220,7 +228,7 @@ rename_retries_service_under_a_new_label_until_uncontested() ->
     ServiceType = "_proberename._tcp",
     FullName = mdns_proto:service_instance_name("Probe Rename", ServiceType),
     OtherSrv = {0, 0, 9999, "othertarget.local"},
-    spawn_conflicting_responder(FullName, srv, OtherSrv),
+    spawn_conflicting_responder(unicode:characters_to_list(FullName), srv, OtherSrv),
     RenameFun = fun(Label, Attempt) -> Label ++ "-" ++ integer_to_list(Attempt) end,
     {ok, Ref, FinalName} = mdns:register_service(
         "Probe Rename",
@@ -234,7 +242,7 @@ rename_retries_service_under_a_new_label_until_uncontested() ->
         mdns_proto:service_instance_name("Probe Rename-1", ServiceType), FinalName
     ),
     ?assertMatch(
-        [{{0, 0, 8080, "probetarget.local"}, _}], mdns_registry:answers_for(FinalName, srv)
+        [{{0, 0, 8080, <<"probetarget.local">>}, _}], mdns_registry:answers_for(FinalName, srv)
     ),
     ?assertEqual([], mdns_registry:answers_for(FullName, srv)),
     ok = mdns:unregister(Ref).
@@ -243,7 +251,9 @@ auto_is_shorthand_for_service_label_attempt_number() ->
     ServiceType = "_probeauto._tcp",
     OtherSrv = {0, 0, 9999, "othertarget.local"},
     spawn_conflicting_responder(
-        mdns_proto:service_instance_name("Probe Auto", ServiceType), srv, OtherSrv
+        unicode:characters_to_list(mdns_proto:service_instance_name("Probe Auto", ServiceType)),
+        srv,
+        OtherSrv
     ),
     {ok, Ref, FinalName} = mdns:register_service(
         "Probe Auto", ServiceType, 8080, [], "probetarget.local", #{on_conflict => auto}

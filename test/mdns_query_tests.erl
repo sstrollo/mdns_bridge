@@ -26,18 +26,22 @@ start() ->
 stop(Pids) ->
     [gen_server:stop(Pid) || Pid <- lists:reverse(Pids)].
 
+%% mdns_cache:insert_many/1 doesn't normalize anything itself - trusts
+%% its caller (see mdns_cache's moduledoc) - so entries here use binary
+%% names to match what resolve/3 (via mdns_proto:normalize_name/1)
+%% actually looks them up as.
 registry_answer_takes_precedence_over_cache() ->
     {ok, Ref, _} = mdns:register("query-precedence.local", {10, 0, 0, 1}, #{
         validate => false, probe => false
     }),
-    ok = mdns_cache:insert_many([{"query-precedence.local", a, {10, 0, 0, 99}, 120, false}]),
+    ok = mdns_cache:insert_many([{<<"query-precedence.local">>, a, {10, 0, 0, 99}, 120, false}]),
     ?assertMatch(
         {ok, [{{10, 0, 0, 1}, _}]}, mdns_query:resolve("query-precedence.local", a, 100)
     ),
     ok = mdns:unregister(Ref).
 
 cache_hit_returns_immediately() ->
-    ok = mdns_cache:insert_many([{"query-cache-hit.local", a, {10, 0, 0, 2}, 120, false}]),
+    ok = mdns_cache:insert_many([{<<"query-cache-hit.local">>, a, {10, 0, 0, 2}, 120, false}]),
     ?assertMatch({ok, [{{10, 0, 0, 2}, _}]}, mdns_query:resolve("query-cache-hit.local", a, 100)).
 
 cache_miss_times_out() ->
@@ -52,7 +56,7 @@ cache_miss_wakes_up_on_a_later_insert() ->
         Self ! {resolved, mdns_query:resolve("query-appears-late.local", a, 5000)}
     end),
     timer:sleep(100),
-    ok = mdns_cache:insert_many([{"query-appears-late.local", a, {10, 0, 0, 3}, 120, false}]),
+    ok = mdns_cache:insert_many([{<<"query-appears-late.local">>, a, {10, 0, 0, 3}, 120, false}]),
     receive
         {resolved, Result} -> ?assertMatch({ok, [{{10, 0, 0, 3}, _}]}, Result)
     after 1000 ->

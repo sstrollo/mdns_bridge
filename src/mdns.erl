@@ -24,7 +24,7 @@
 
 %% @doc Equivalent to `register(Name, Ip, #{})'.
 -spec register(string() | binary(), inet:ip4_address()) ->
-    {ok, reference(), string()} | {error, term()}.
+    {ok, reference(), binary()} | {error, term()}.
 register(Name, Ip) ->
     mdns_registry:register(Name, Ip).
 
@@ -46,26 +46,28 @@ register(Name, Ip) ->
 %%   - `{rename, Fun}' - probe time only: call `Fun(OriginalName, Attempt)'
 %%     for a new name to try instead, up to the configured
 %%     `max_rename_attempts' (default 10). `Fun' always receives the
-%%     *original* name passed to register/2,3 (not the previous attempt's
-%%     name) and the 1-based attempt number, and returns the next name to
-%%     try - so a simple `fun(N, Attempt) -> N ++ "-" ++
-%%     integer_to_list(Attempt) end' produces "foo-1", "foo-2", ... rather
-%%     than compounding into "foo-1-2-3".
+%%     *original* name passed to register/2,3 (a binary, not the previous
+%%     attempt's name) and the 1-based attempt number, and returns the
+%%     next name to try (a `string()' or `binary()', either is fine) - so
+%%     a simple `fun(N, Attempt) -> <<N/binary, "-",
+%%     (integer_to_binary(Attempt))/binary>> end' produces "foo-1",
+%%     "foo-2", ... rather than compounding into "foo-1-2-3".
 %%   - `auto' - shorthand for exactly that Fun (inserted before the
 %%     `.local' suffix, so "foo.local" becomes "foo-1.local", not the
 %%     invalid "foo.local-1").
 %%
 %% Returns `{ok, Ref, FinalName}' on success - `FinalName' is the name
-%% actually claimed, which can differ from `Name' if `{rename, Fun}'
-%% resolved a conflict. Keep `Ref' - it's what `unregister/1' takes, and
-%% what a later `{mdns_bridge_conflict, Ref, FinalName}' message (sent to
-%% the calling process if ongoing defense ever has to give up the name)
-%% will reference.
+%% actually claimed (a binary), which can differ from `Name' if
+%% `{rename, Fun}' resolved a conflict. Keep `Ref' - it's what
+%% `unregister/1' takes, and what a later
+%% `{mdns_bridge_conflict, Ref, FinalName}' message (sent to the calling
+%% process if ongoing defense ever has to give up the name) will
+%% reference.
 %%
 %% The registration is withdrawn automatically if the calling process
 %% exits.
 -spec register(string() | binary(), inet:ip4_address(), mdns_registry:opts()) ->
-    {ok, reference(), string()} | {error, term()}.
+    {ok, reference(), binary()} | {error, term()}.
 register(Name, Ip, Opts) ->
     mdns_registry:register(Name, Ip, Opts).
 
@@ -77,7 +79,7 @@ register(Name, Ip, Opts) ->
     non_neg_integer(),
     [{iodata(), iodata()} | iodata()],
     string() | binary()
-) -> {ok, reference(), string()} | {error, term()}.
+) -> {ok, reference(), binary()} | {error, term()}.
 register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost) ->
     mdns_registry:register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost).
 
@@ -126,7 +128,7 @@ register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost) ->
     [{iodata(), iodata()} | iodata()],
     string() | binary(),
     mdns_registry:service_opts()
-) -> {ok, reference(), string()} | {error, term()}.
+) -> {ok, reference(), binary()} | {error, term()}.
 register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost, Opts) ->
     mdns_registry:register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost, Opts).
 

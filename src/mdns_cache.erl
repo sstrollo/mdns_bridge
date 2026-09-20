@@ -53,7 +53,7 @@
 %% the timer's identity, so both the 'DOWN' and the timeout message that
 %% can end a wait carry the exact key needed to find and remove it.
 -type waiter() :: #{
-    name := string(),
+    name := binary(),
     type := atom(),
     from := gen_server:from(),
     timer := reference() | undefined
@@ -63,7 +63,7 @@
 
 %% Entry as produced by mdns_proto:extract_answers/1.
 -type entry() :: {
-    Name :: string(),
+    Name :: binary(),
     Type :: atom(),
     Data :: term(),
     Ttl :: non_neg_integer(),
@@ -84,7 +84,7 @@ insert_many(Entries) ->
     gen_server:call(?SERVER, {insert_many, Entries}).
 
 %% Direct ETS read: current, unexpired {Data, RemainingTtlSeconds} answers.
--spec lookup(string(), atom()) -> [{term(), non_neg_integer()}].
+-spec lookup(binary(), atom()) -> [{term(), non_neg_integer()}].
 lookup(Name, Type) ->
     Now = now_ms(),
     [
@@ -95,7 +95,7 @@ lookup(Name, Type) ->
 
 %% {Name, Type} pairs with at least one unexpired entry due to expire
 %% within WithinSeconds - candidates for proactive refresh.
--spec near_expiry(non_neg_integer()) -> [{string(), atom()}].
+-spec near_expiry(non_neg_integer()) -> [{binary(), atom()}].
 near_expiry(WithinSeconds) ->
     Now = now_ms(),
     Horizon = Now + WithinSeconds * 1000,
@@ -115,7 +115,7 @@ near_expiry(WithinSeconds) ->
 %% replies later with gen_server:reply/2 once one of the three things
 %% that can end it happens - a matching insert, the timer, or the caller
 %% dying - so nothing needs an explicit unsubscribe.
--spec await(string(), atom(), timeout()) ->
+-spec await(binary(), atom(), timeout()) ->
     {ok, [{term(), non_neg_integer()}]} | {error, timeout}.
 await(Name, Type, TimeoutMs) ->
     gen_server:call(?SERVER, {await, Name, Type, TimeoutMs}, infinity).
@@ -126,7 +126,7 @@ await(Name, Type, TimeoutMs) ->
 -spec dump() ->
     [
         #{
-            name := string(),
+            name := binary(),
             type := atom(),
             data := term(),
             ttl_remaining := non_neg_integer(),
