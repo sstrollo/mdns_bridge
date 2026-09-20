@@ -10,7 +10,11 @@
 %% Exposes send_query/2 (mdns_query's active querying), announce/3
 %% (mdns_registry's announcements, reactive answers, and goodbyes),
 %% send_probe/4 and probe_subscribe/2 + probe_unsubscribe/2 (mdns_registry's
-%% probing - see its module doc).
+%% probing - see its module doc). Probe watchers live in this process's
+%% own state (a map, monitoring each subscriber so a caller that crashes
+%% mid-probe doesn't leak its entry) rather than a separate ETS table -
+%% subscribe/unsubscribe happen once per probe, nowhere near hot enough
+%% to need direct ETS access instead of going through the gen_server.
 %% @end
 %%%-------------------------------------------------------------------
 -module(mdns_socket).
@@ -34,9 +38,17 @@
 -define(SERVER, ?MODULE).
 -define(MDNS_GROUP, {224, 0, 0, 251}).
 -define(MDNS_PORT, 5353).
--define(PROBE_WATCHERS, mdns_socket_probe_watchers).
 
--record(state, {socket :: gen_udp:socket(), iface_ip :: inet:ip4_address()}).
+%% {Pid, monitor ref watching it} per subscriber of a {Name, Type} -
+%% the ref lets a subscriber be found and demonitored again by
+%% probe_unsubscribe/2, or dropped on its own on a 'DOWN'.
+-type probe_watchers() :: #{{string(), atom()} => [{pid(), reference()}]}.
+
+-record(state, {
+    socket :: gen_udp:socket(),
+    iface_ip :: inet:ip4_address(),
+    probe_watchers = #{} :: probe_watchers()
+}).
 
 child_spec() ->
     #{id => ?MODULE, start => {?MODULE, start_link, []}}.
@@ -62,20 +74,22 @@ send_probe(Name, Type, Data, Ttl) ->
 %% Register the calling process to receive
 %% `{mdns_probe_seen, Name, Type, Data}' for every answer or competing
 %% probe seen on the wire for Name/Type - used by mdns_registry while
-%% probing a name (see its module doc). Direct ETS access - no need to
-%% go through the gen_server. Unlike mdns_cache:await/3, this genuinely
-%% needs a stream of every matching packet over the whole probe window,
-%% not just a single eventual answer, so a plain subscription (not a
-%% blocking call) is the right shape here.
+%% probing a name (see its module doc). Unlike mdns_cache:await/3, this
+%% genuinely needs a stream of every matching packet over the whole
+%% probe window, not just a single eventual answer, so a plain
+%% subscription - not a blocking wait - is the right shape here; the
+%% messages still land directly in the caller's own mailbox, exactly as
+%% before. A gen_server:call, not a cast: the caller needs to know the
+%% subscription has actually taken effect before it starts probing (and,
+%% for unsubscribe, that no further message can arrive) - the same
+%% synchronous guarantee direct ETS access used to give for free.
 -spec probe_subscribe(string(), atom()) -> ok.
 probe_subscribe(Name, Type) ->
-    true = ets:insert(?PROBE_WATCHERS, {{Name, Type}, self()}),
-    ok.
+    gen_server:call(?SERVER, {probe_subscribe, Name, Type}).
 
 -spec probe_unsubscribe(string(), atom()) -> ok.
 probe_unsubscribe(Name, Type) ->
-    ets:delete_object(?PROBE_WATCHERS, {{Name, Type}, self()}),
-    ok.
+    gen_server:call(?SERVER, {probe_unsubscribe, Name, Type}).
 
 %% Call when the embedding system detects that the configured
 %% interface's address changed (e.g. a DHCP renewal) - this app does not
@@ -95,7 +109,6 @@ init([]) ->
                         "mdns_socket: joined ~p on interface ~p",
                         [?MDNS_GROUP, IfaceIp]
                     ),
-                    ets:new(?PROBE_WATCHERS, [bag, public, named_table]),
                     {ok, #state{socket = Socket, iface_ip = IfaceIp}};
                 {error, Reason} ->
                     {stop, {socket_open_failed, Reason}}
@@ -140,6 +153,17 @@ handle_call(refresh_interface, _From, State) ->
         {error, Reason} ->
             {reply, {error, Reason}, State}
     end;
+handle_call({probe_subscribe, Name, Type}, {FromPid, _Tag}, State) ->
+    Ref = erlang:monitor(process, FromPid),
+    Watchers = maps:update_with(
+        {Name, Type},
+        fun(W) -> [{FromPid, Ref} | W] end,
+        [{FromPid, Ref}],
+        State#state.probe_watchers
+    ),
+    {reply, ok, State#state{probe_watchers = Watchers}};
+handle_call({probe_unsubscribe, Name, Type}, {FromPid, _Tag}, State) ->
+    {reply, ok, remove_watcher(Name, Type, FromPid, State)};
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
@@ -168,12 +192,14 @@ handle_info({udp, Socket, _SrcIp, _SrcPort, Packet}, #state{socket = Socket} = S
                     mdns_cache:insert_many(Entries),
                     check_conflicts(Entries)
             end,
-            notify_probe_watchers(mdns_proto:extract_watched_records(DnsRec)),
+            notify_probe_watchers(mdns_proto:extract_watched_records(DnsRec), State),
             answer_registered_questions(DnsRec, State);
         {error, _Reason} ->
             ok
     end,
     {noreply, State};
+handle_info({'DOWN', Ref, process, Pid, _Reason}, State) ->
+    {noreply, State#state{probe_watchers = drop_watcher(Pid, Ref, State#state.probe_watchers)}};
 handle_info(_Msg, State) ->
     {noreply, State}.
 
@@ -220,15 +246,43 @@ answer_if_registered(#dns_query{domain = Domain, type = Type}, State) ->
             do_send(mdns_proto:mdns_answer(Name, Type, Answers), State)
     end.
 
-notify_probe_watchers(Records) ->
-    [notify_one_probe_watcher(R) || R <- Records],
+notify_probe_watchers(Records, State) ->
+    [notify_one_probe_watcher(R, State) || R <- Records],
     ok.
 
-notify_one_probe_watcher({Name, Type, Data, _Ttl, _CacheFlush}) ->
-    case ets:lookup(?PROBE_WATCHERS, {Name, Type}) of
+notify_one_probe_watcher({Name, Type, Data, _Ttl, _CacheFlush}, State) ->
+    case maps:get({Name, Type}, State#state.probe_watchers, []) of
         [] -> ok;
-        Watchers -> [Pid ! {mdns_probe_seen, Name, Type, Data} || {_, Pid} <- Watchers]
+        Watchers -> [Pid ! {mdns_probe_seen, Name, Type, Data} || {Pid, _Ref} <- Watchers]
     end.
+
+%% Removes Pid's watch on {Name, Type} specifically (probe_unsubscribe/2)
+%% - demonitoring it, so a 'DOWN' for it can't arrive after the fact.
+remove_watcher(Name, Type, Pid, State) ->
+    Key = {Name, Type},
+    case maps:get(Key, State#state.probe_watchers, []) of
+        [] ->
+            State;
+        Watchers ->
+            {ToRemove, Remaining} = lists:partition(fun({P, _Ref}) -> P =:= Pid end, Watchers),
+            [erlang:demonitor(Ref, [flush]) || {_Pid, Ref} <- ToRemove],
+            State#state{probe_watchers = put_or_remove(Key, Remaining, State#state.probe_watchers)}
+    end.
+
+%% Removes whatever {Pid, Ref} watch this 'DOWN' belongs to, wherever it
+%% is - a crashed caller may have died before ever calling
+%% probe_unsubscribe/2, and this is what stops that from leaking.
+drop_watcher(Pid, Ref, Watchers) ->
+    maps:fold(
+        fun(Key, W, Acc) ->
+            put_or_remove(Key, lists:delete({Pid, Ref}, W), Acc)
+        end,
+        Watchers,
+        Watchers
+    ).
+
+put_or_remove(Key, [], Map) -> maps:remove(Key, Map);
+put_or_remove(Key, Watchers, Map) -> Map#{Key => Watchers}.
 
 do_send(Rec, State) ->
     Packet = inet_dns:encode(Rec, true),
