@@ -68,7 +68,7 @@ init([]) ->
     Opts = [binary, {active, true}, {reuseaddr, true}, {ip, BindIp}],
     case gen_udp:open(Port, Opts) of
         {ok, Socket} ->
-            logger:info("mdns_dns_server: listening on ~p:~p", [BindIp, Port]),
+            logger:info("mdns_dns_server: listening on ~0p:~b", [BindIp, Port]),
             schedule_rate_reset(),
             {ok, #state{socket = Socket, rate_limit = RateLimit}};
         {error, Reason} ->

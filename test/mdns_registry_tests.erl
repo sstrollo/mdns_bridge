@@ -60,18 +60,18 @@ registers_ptr_srv_and_txt_together() ->
             probe => false
         }
     ),
-    ?assertEqual(<<"my printer._http._tcp.local">>, FinalName),
+    ?assertEqual(~"my printer._http._tcp.local", FinalName),
     ?assertMatch(
-        [{{0, 0, 631, <<"servicehost1.local">>}, _}],
+        [{{0, 0, 631, ~"servicehost1.local"}, _}],
         mdns_registry:answers_for(FinalName, srv)
     ),
-    ?assertMatch([{[<<"path=/">>], _}], mdns_registry:answers_for(FinalName, txt)),
+    ?assertMatch([{[~"path=/"], _}], mdns_registry:answers_for(FinalName, txt)),
     ?assertMatch(
-        [{FinalName, _}], mdns_registry:answers_for(<<"_http._tcp.local">>, ptr)
+        [{FinalName, _}], mdns_registry:answers_for(~"_http._tcp.local", ptr)
     ),
     ?assertMatch(
-        [{<<"_http._tcp.local">>, _}],
-        mdns_registry:answers_for(<<"_services._dns-sd._udp.local">>, ptr)
+        [{~"_http._tcp.local", _}],
+        mdns_registry:answers_for(~"_services._dns-sd._udp.local", ptr)
     ),
     ok = mdns_registry:unregister(Ref).
 
@@ -89,8 +89,8 @@ unregister_withdraws_the_whole_service() ->
     ok = mdns_registry:unregister(Ref),
     ?assertEqual([], mdns_registry:answers_for(FinalName, srv)),
     ?assertEqual([], mdns_registry:answers_for(FinalName, txt)),
-    ?assertEqual([], mdns_registry:answers_for(<<"_http._tcp.local">>, ptr)),
-    ?assertEqual([], mdns_registry:answers_for(<<"_services._dns-sd._udp.local">>, ptr)).
+    ?assertEqual([], mdns_registry:answers_for(~"_http._tcp.local", ptr)),
+    ?assertEqual([], mdns_registry:answers_for(~"_services._dns-sd._udp.local", ptr)).
 
 auto_withdraw_on_process_death_withdraws_the_whole_service() ->
     Parent = self(),
@@ -116,8 +116,8 @@ auto_withdraw_on_process_death_withdraws_the_whole_service() ->
     end,
     timer:sleep(50),
     ?assertEqual([], mdns_registry:answers_for(FinalName, srv)),
-    ?assertEqual([], mdns_registry:answers_for(<<"_http._tcp.local">>, ptr)),
-    ?assertEqual([], mdns_registry:answers_for(<<"_services._dns-sd._udp.local">>, ptr)).
+    ?assertEqual([], mdns_registry:answers_for(~"_http._tcp.local", ptr)),
+    ?assertEqual([], mdns_registry:answers_for(~"_services._dns-sd._udp.local", ptr)).
 
 meta_ptr_is_reference_counted_across_same_type_services() ->
     {ok, Ref1, _} = mdns_registry:register_service(
@@ -127,17 +127,17 @@ meta_ptr_is_reference_counted_across_same_type_services() ->
         "Svc Two", "_ipp._tcp", 81, [], service_local_target(6), #{probe => false}
     ),
     ?assertMatch(
-        [{<<"_ipp._tcp.local">>, _}],
-        mdns_registry:answers_for(<<"_services._dns-sd._udp.local">>, ptr)
+        [{~"_ipp._tcp.local", _}],
+        mdns_registry:answers_for(~"_services._dns-sd._udp.local", ptr)
     ),
     ok = mdns_registry:unregister(Ref1),
     %% Svc Two is still live - the shared meta-PTR must not be withdrawn yet.
     ?assertMatch(
-        [{<<"_ipp._tcp.local">>, _}],
-        mdns_registry:answers_for(<<"_services._dns-sd._udp.local">>, ptr)
+        [{~"_ipp._tcp.local", _}],
+        mdns_registry:answers_for(~"_services._dns-sd._udp.local", ptr)
     ),
     ok = mdns_registry:unregister(Ref2),
-    ?assertEqual([], mdns_registry:answers_for(<<"_services._dns-sd._udp.local">>, ptr)).
+    ?assertEqual([], mdns_registry:answers_for(~"_services._dns-sd._udp.local", ptr)).
 
 target_host_need_not_be_separately_registered() ->
     %% "otherhost.local" is never registered via mdns_registry:register/2,3
@@ -146,7 +146,7 @@ target_host_need_not_be_separately_registered() ->
         "Proxy Svc", "_http._tcp", 80, [], "otherhost.local", #{probe => false}
     ),
     ?assertMatch(
-        [{{0, 0, 80, <<"otherhost.local">>}, _}], mdns_registry:answers_for(FinalName, srv)
+        [{{0, 0, 80, ~"otherhost.local"}, _}], mdns_registry:answers_for(FinalName, srv)
     ),
     ok = mdns_registry:unregister(Ref).
 
@@ -205,12 +205,12 @@ sibling_ip(Offset) ->
 
 register_and_unregister() ->
     Ip = sibling_ip(1),
-    {ok, Ref, <<"test-reg.local">>} = mdns_registry:register("test-reg.local", Ip, #{
+    {ok, Ref, ~"test-reg.local"} = mdns_registry:register("test-reg.local", Ip, #{
         probe => false
     }),
-    ?assertMatch([{Ip, _Ttl}], mdns_registry:answers_for(<<"test-reg.local">>, a)),
+    ?assertMatch([{Ip, _Ttl}], mdns_registry:answers_for(~"test-reg.local", a)),
     ok = mdns_registry:unregister(Ref),
-    ?assertEqual([], mdns_registry:answers_for(<<"test-reg.local">>, a)),
+    ?assertEqual([], mdns_registry:answers_for(~"test-reg.local", a)),
     %% unregistering an already-gone ref is a no-op, not an error
     ok = mdns_registry:unregister(Ref).
 
@@ -228,7 +228,7 @@ auto_withdraw_on_process_death() ->
         registered -> ok
     after 1000 -> ?assert(false)
     end,
-    ?assertMatch([{Ip, _Ttl}], mdns_registry:answers_for(<<"test-death.local">>, a)),
+    ?assertMatch([{Ip, _Ttl}], mdns_registry:answers_for(~"test-death.local", a)),
     Mon = monitor(process, Pid),
     exit(Pid, kill),
     receive
@@ -238,7 +238,7 @@ auto_withdraw_on_process_death() ->
     %% mdns_registry has its own, independent monitor on Pid - give it a
     %% moment to process its own 'DOWN' before asserting cleanup happened.
     timer:sleep(50),
-    ?assertEqual([], mdns_registry:answers_for(<<"test-death.local">>, a)).
+    ?assertEqual([], mdns_registry:answers_for(~"test-death.local", a)).
 
 takeover_keeps_registration_alive() ->
     Ip = sibling_ip(3),
@@ -263,9 +263,9 @@ takeover_keeps_registration_alive() ->
     end,
     timer:sleep(50),
     %% Pid1's death must not withdraw the registration Ref2 took over.
-    ?assertMatch([{Ip, _Ttl}], mdns_registry:answers_for(<<"test-takeover.local">>, a)),
+    ?assertMatch([{Ip, _Ttl}], mdns_registry:answers_for(~"test-takeover.local", a)),
     ok = mdns_registry:unregister(Ref2),
-    ?assertEqual([], mdns_registry:answers_for(<<"test-takeover.local">>, a)).
+    ?assertEqual([], mdns_registry:answers_for(~"test-takeover.local", a)).
 
 rejects_out_of_subnet_address_by_default() ->
     %% RFC 5737 TEST-NET-3: guaranteed not to be this host's subnet. Fails
@@ -280,7 +280,7 @@ validate_false_allows_out_of_subnet_address() ->
         validate => false, probe => false
     }),
     ?assertMatch(
-        [{{203, 0, 113, 1}, _}], mdns_registry:answers_for(<<"test-subnet-override.local">>, a)
+        [{{203, 0, 113, 1}, _}], mdns_registry:answers_for(~"test-subnet-override.local", a)
     ),
     ok = mdns_registry:unregister(Ref).
 
@@ -315,7 +315,7 @@ rejects_non_boolean_validate_option_without_crashing() ->
         mdns_registry:register("test-bad-opts.local", sibling_ip(6), #{validate => not_a_boolean})
     ),
     ?assertEqual(Pid, whereis(mdns_registry)),
-    ?assertMatch([{Ip, _Ttl}], mdns_registry:answers_for(<<"test-survivor.local">>, a)),
+    ?assertMatch([{Ip, _Ttl}], mdns_registry:answers_for(~"test-survivor.local", a)),
     ok = mdns_registry:unregister(Ref).
 
 rejects_non_boolean_probe_option() ->
@@ -359,7 +359,7 @@ refresh_interface_leaves_registry_usable() ->
     ?assertEqual(ok, mdns_registry:refresh_interface()),
     Ip = sibling_ip(8),
     {ok, Ref, _} = mdns_registry:register("test-after-refresh.local", Ip, #{probe => false}),
-    ?assertMatch([{Ip, _Ttl}], mdns_registry:answers_for(<<"test-after-refresh.local">>, a)),
+    ?assertMatch([{Ip, _Ttl}], mdns_registry:answers_for(~"test-after-refresh.local", a)),
     ok = mdns_registry:unregister(Ref).
 
 %% -- RFC 6762 section 9: ongoing conflict defense --------------------------
@@ -380,15 +380,15 @@ ongoing_conflict_is_defended_once_then_given_up() ->
     Other = sibling_ip(13),
     {ok, Ref, _} = mdns_registry:register("test-defend.local", Ip, #{probe => false}),
     %% First conflicting answer: defended, still registered.
-    ok = mdns_registry:notify_conflict(<<"test-defend.local">>, a, Other),
+    ok = mdns_registry:notify_conflict(~"test-defend.local", a, Other),
     sync(),
-    ?assertMatch([{Ip, _}], mdns_registry:answers_for(<<"test-defend.local">>, a)),
+    ?assertMatch([{Ip, _}], mdns_registry:answers_for(~"test-defend.local", a)),
     %% Same conflict again, right away (within the grace window): give up.
-    ok = mdns_registry:notify_conflict(<<"test-defend.local">>, a, Other),
+    ok = mdns_registry:notify_conflict(~"test-defend.local", a, Other),
     sync(),
-    ?assertEqual([], mdns_registry:answers_for(<<"test-defend.local">>, a)),
+    ?assertEqual([], mdns_registry:answers_for(~"test-defend.local", a)),
     receive
-        {mdns_bridge_conflict, Ref, <<"test-defend.local">>} -> ok
+        {mdns_bridge_conflict, Ref, ~"test-defend.local"} -> ok
     after 1000 -> ?assert(false)
     end.
 
@@ -399,9 +399,9 @@ ongoing_conflict_is_ignored_for_our_own_sibling_data() ->
     {ok, Ref2, _} = mdns_registry:register("test-roundrobin.local", Ip2, #{probe => false}),
     %% "Conflict" report matching one of our own sibling registrations
     %% must not trigger defense/give-up at all.
-    ok = mdns_registry:notify_conflict(<<"test-roundrobin.local">>, a, Ip2),
+    ok = mdns_registry:notify_conflict(~"test-roundrobin.local", a, Ip2),
     sync(),
-    ?assertEqual(2, length(mdns_registry:answers_for(<<"test-roundrobin.local">>, a))),
+    ?assertEqual(2, length(mdns_registry:answers_for(~"test-roundrobin.local", a))),
     ok = mdns_registry:unregister(Ref1),
     ok = mdns_registry:unregister(Ref2).
 
@@ -411,10 +411,10 @@ force_on_conflict_never_gives_up_ongoing_defense() ->
     {ok, _Ref, _} = mdns_registry:register("test-force-defend.local", Ip, #{
         probe => false, on_conflict => force
     }),
-    ok = mdns_registry:notify_conflict(<<"test-force-defend.local">>, a, Other),
+    ok = mdns_registry:notify_conflict(~"test-force-defend.local", a, Other),
     sync(),
-    ok = mdns_registry:notify_conflict(<<"test-force-defend.local">>, a, Other),
+    ok = mdns_registry:notify_conflict(~"test-force-defend.local", a, Other),
     sync(),
-    ok = mdns_registry:notify_conflict(<<"test-force-defend.local">>, a, Other),
+    ok = mdns_registry:notify_conflict(~"test-force-defend.local", a, Other),
     sync(),
-    ?assertMatch([{Ip, _}], mdns_registry:answers_for(<<"test-force-defend.local">>, a)).
+    ?assertMatch([{Ip, _}], mdns_registry:answers_for(~"test-force-defend.local", a)).

@@ -106,7 +106,7 @@ init([]) ->
             case open_socket(IfaceIp) of
                 {ok, Socket} ->
                     logger:info(
-                        "mdns_socket: joined ~p on interface ~p",
+                        "mdns_socket: joined ~0p on interface ~0p",
                         [?MDNS_GROUP, IfaceIp]
                     ),
                     {ok, #state{socket = Socket, iface_ip = IfaceIp}};
@@ -146,7 +146,7 @@ handle_call(refresh_interface, _From, State) ->
             ok = inet:setopts(State#state.socket, [
                 {add_membership, {?MDNS_GROUP, NewIp}}, {multicast_if, NewIp}
             ]),
-            logger:info("mdns_socket: interface changed ~p -> ~p", [OldIp, NewIp]),
+            logger:info("mdns_socket: interface changed ~0p -> ~0p", [OldIp, NewIp]),
             {reply, ok, State#state{iface_ip = NewIp}};
         {ok, _UnchangedIp} ->
             {reply, ok, State};

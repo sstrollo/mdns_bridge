@@ -36,7 +36,7 @@
 ]).
 
 -define(CLASS_IN, in).
--define(LOCAL_SUFFIX, <<".local">>).
+-define(LOCAL_SUFFIX, ~".local").
 
 %% DNS names are case-insensitive; normalize for use as cache keys.
 %% string:trim/3's "trailing" direction strips every trailing "." rather
@@ -49,7 +49,7 @@ normalize_name(Name) ->
 %% Name must already be normalize_name/1'd.
 -spec is_local(binary()) -> boolean().
 is_local(Name) ->
-    Name =:= <<"local">> orelse ends_with(Name, ?LOCAL_SUFFIX).
+    Name =:= ~"local" orelse ends_with(Name, ?LOCAL_SUFFIX).
 
 ends_with(Bin, Suffix) ->
     SuffixSize = byte_size(Suffix),
@@ -170,18 +170,18 @@ to_domain(Name) -> unicode:characters_to_list(Name).
 %% *original* input for each pass, never the text it just inserted.
 -spec escape_label(string() | binary()) -> binary().
 escape_label(Label) ->
-    Escaped = binary:replace(to_binary(Label), <<"\\">>, <<"\\\\">>, [global]),
-    binary:replace(Escaped, <<".">>, <<"\\.">>, [global]).
+    Escaped = binary:replace(to_binary(Label), ~"\\", ~"\\\\", [global]),
+    binary:replace(Escaped, ~".", ~"\\.", [global]).
 
 %% The DNS-SD service type name for ServiceType (e.g. "_http._tcp"),
-%% e.g. <<"_http._tcp.local">>.
+%% e.g. ~"_http._tcp.local".
 -spec service_type_name(string() | binary()) -> binary().
 service_type_name(ServiceType) ->
     normalize_name(<<(to_binary(ServiceType))/binary, ?LOCAL_SUFFIX/binary>>).
 
 %% The full DNS-SD service instance name for InstanceName under
 %% ServiceType, e.g. service_instance_name("My Printer", "_http._tcp")
-%% -> <<"my printer._http._tcp.local">>. InstanceName is escape_label/1'd
+%% -> ~"my printer._http._tcp.local". InstanceName is escape_label/1'd
 %% first, then - like every other name in this app - the whole result is
 %% normalize_name/1'd, which lowercases it: display casing isn't
 %% preserved, a known simplification (see the README).

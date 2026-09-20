@@ -37,7 +37,7 @@ enabled_prints_every_event_to_the_given_device() ->
     {ok, F} = file:open(Path, [write]),
     ok = mdns_trace:enable(F),
     timer:sleep(20),
-    ok = mdns_trace:event(added, #{name => <<"foo.local">>, ttl => 120}),
+    ok = mdns_trace:event(added, #{name => ~"foo.local", ttl => 120}),
     timer:sleep(20),
     ok = file:close(F),
     Text = read_and_delete(Path),

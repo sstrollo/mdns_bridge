@@ -93,7 +93,7 @@
 -define(DEFAULT_MAX_RENAME_ATTEMPTS, 10).
 -define(KNOWN_OPTS, [validate, probe, on_conflict]).
 -define(KNOWN_SERVICE_OPTS, [probe, on_conflict]).
--define(META_SERVICE_NAME, <<"_services._dns-sd._udp.local">>).
+-define(META_SERVICE_NAME, ~"_services._dns-sd._udp.local").
 
 %% RFC 6762 8.1: three probes, 250ms apart, preceded by a random 0-249ms
 %% delay (spreads out synchronized probing after e.g. a mass power-on).
@@ -439,7 +439,7 @@ default_rename_fun(Name0, Attempt) ->
     <<Base/binary, "-", (integer_to_binary(Attempt))/binary, Suffix/binary>>.
 
 split_local_suffix(Name) ->
-    Suffix = <<".local">>,
+    Suffix = ~".local",
     SuffixSize = byte_size(Suffix),
     NameSize = byte_size(Name),
     case

@@ -158,10 +158,11 @@ print() ->
 
 %% Prints dump/0's result to IoDevice, one line per entry, sorted by
 %% {Name, Type} for readability. Data is whatever shape that record type
-%% happens to use (a tuple for a/aaaa/srv, a string or list of strings
+%% happens to use (a tuple for a/aaaa/srv, a binary or list of binaries
 %% for ptr/txt, a raw binary for anything this app doesn't specifically
-%% understand) - printed with ~p either way, so nothing here is
-%% type-specific enough to need a Type-keyed formatting table.
+%% understand) - printed with ~0p either way (single line even for a
+%% deeply nested term, unlike plain ~p), so nothing here is type-specific
+%% enough to need a Type-keyed formatting table.
 %%
 %% Deliberately no fixed-width columns: io_lib's ~s/~w *truncate* (to a
 %% row of `*`s, for ~w) a value wider than its given field width rather
@@ -178,11 +179,11 @@ print(IoDevice) ->
         dump()
     ),
     [
-        io:format(IoDevice, "~s ~w ttl=~w age=~w ~p~n", [Name, Type, Ttl, Age, Data])
+        io:format(IoDevice, "~s ~0p ttl=~b age=~b ~0p\n", [Name, Type, Ttl, Age, Data])
      || #{name := Name, type := Type, data := Data, ttl_remaining := Ttl, age := Age} <-
             Entries
     ],
-    io:format(IoDevice, "~p entries~n", [length(Entries)]).
+    io:format(IoDevice, "~b entries\n", [length(Entries)]).
 
 init([]) ->
     ets:new(?TAB, [set, public, named_table, {read_concurrency, true}]),
