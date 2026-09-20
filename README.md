@@ -107,17 +107,34 @@ on a real network) rather than just misalign it:
     2 entries
 
 Cache inserts, removals (goodbye packets, RFC 6762 10.2 cache-flush
-evictions, natural TTL expiry, and `cache_max_entries` cap evictions) all
-log at `debug` level. OTP's default primary log level (`notice`) filters
-these - and this app's own one-off `info` messages - out; raise it to see
-them, e.g. from the shell:
+evictions, natural TTL expiry, and `cache_max_entries` cap evictions) are
+each individually too frequent on a busy network to leave on
+permanently, even at `debug` log level - instead, `mdns_trace` toggles
+watching them on demand, built on Erlang's own call-tracing rather than
+a log level:
 
-    1> logger:set_primary_config(level, debug).
+    1> mdns_trace:enable().
+    ok
+    2> mdns_trace: <0.213.0> added #{data => {192,168,1,42},name => <<"my-printer.local">>,ttl => 120,type => a}
+    3> mdns_trace:disable().
+    ok
+
+`enable/1` takes an explicit `io:device()` (default `standard_io`) to
+print to, same idea as `mdns_cache:print/1`. Disabled tracing costs one
+do-nothing function call at each instrumented site - see `mdns_trace`'s
+module doc.
+
+This app's own one-off `info` log messages (an interface join, an
+interface change) are unrelated to `mdns_trace` and still go through
+`logger` as normal - OTP's default primary log level (`notice`) filters
+those out; raise it to see them, e.g. from the shell:
+
+    1> logger:set_primary_config(level, info).
 
 or persistently via `sys.config`:
 
 ```erlang
-{kernel, [{logger_level, debug}]}
+{kernel, [{logger_level, info}]}
 ```
 
 Test

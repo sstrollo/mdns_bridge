@@ -24,6 +24,10 @@
 %% caller as a waiter (monitoring it, and setting a timer for TimeoutMs)
 %% and replies later, from insert_many/1's handling, via
 %% gen_server:reply/2 - no ETS, no raw `receive` in the caller.
+%%
+%% Every insert/removal/eviction is instrumented via mdns_trace:event/2
+%% - too frequent to leave on at `debug' log level permanently on a busy
+%% network, but toggleable on demand with mdns_trace:enable/0,1.
 %% @end
 %%%-------------------------------------------------------------------
 -module(mdns_cache).
@@ -252,9 +256,7 @@ flush_stale({Name, Type}, Now) ->
         0 ->
             ok;
         Count ->
-            logger:debug("mdns_cache: cache-flush removed ~p stale entr(ies) for ~p/~p", [
-                Count, Name, Type
-            ])
+            mdns_trace:event(cache_flush, #{count => Count, name => Name, type => Type})
     end.
 
 store_entry({Name, Type, Data, 0, _CacheFlush}, _Now) ->
@@ -263,7 +265,7 @@ store_entry({Name, Type, Data, 0, _CacheFlush}, _Now) ->
         [] ->
             ok;
         [_] ->
-            logger:debug("mdns_cache: removed (goodbye) ~p/~p ~p", [Name, Type, Data])
+            mdns_trace:event(removed_goodbye, #{name => Name, type => Type, data => Data})
     end,
     {Name, Type};
 store_entry({Name, Type, Data, Ttl, _CacheFlush}, Now) ->
@@ -271,7 +273,7 @@ store_entry({Name, Type, Data, Ttl, _CacheFlush}, Now) ->
     IsNew = ets:lookup(?TAB, {Name, Type, Data}) =:= [],
     ets:insert(?TAB, {{Name, Type, Data}, {ExpiresAt, Now}}),
     IsNew andalso
-        logger:debug("mdns_cache: added ~p/~p ~p (ttl=~p)", [Name, Type, Data, Ttl]),
+        mdns_trace:event(added, #{name => Name, type => Type, data => Data, ttl => Ttl}),
     {Name, Type}.
 
 %% Answers and removes every waiter on {Name, Type}, if there's now
@@ -320,7 +322,7 @@ expire_rows() ->
     Now = now_ms(),
     case ets:select_delete(?TAB, [{{'_', {'$1', '_'}}, [{'=<', '$1', Now}], [true]}]) of
         0 -> ok;
-        Count -> logger:debug("mdns_cache: expired ~p entr(ies) (natural TTL)", [Count])
+        Count -> mdns_trace:event(expired, #{count => Count})
     end.
 
 %% Oldest-InsertedAt-first eviction once over the configured cap. Only
@@ -345,9 +347,7 @@ evict_oldest(N) ->
     ByAge = ets:select(?TAB, [{{'$1', {'_', '$2'}}, [], [{{'$2', '$1'}}]}]),
     ToEvict = lists:sublist(lists:sort(ByAge), N),
     [ets:delete(?TAB, Key) || {_InsertedAt, Key} <- ToEvict],
-    logger:debug("mdns_cache: evicted ~p oldest entr(ies) (over cache_max_entries): ~p", [
-        N, [Key || {_InsertedAt, Key} <- ToEvict]
-    ]),
+    mdns_trace:event(evicted, #{count => N, keys => [Key || {_InsertedAt, Key} <- ToEvict]}),
     ok.
 
 now_ms() ->
