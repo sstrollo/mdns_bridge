@@ -8,8 +8,22 @@ cache_test_() ->
             fun insert_and_lookup/0,
             fun goodbye_removes_entry/0,
             fun near_expiry_reports_soon_to_expire/0,
-            fun subscriber_is_notified_on_insert/0,
             fun dump_reports_current_entries/0
+        ]
+    end}.
+
+%% Own fixture (a fresh, empty table) - await/3's job is inherently about
+%% timing/concurrency (a waiting caller, a competing insert, a dead
+%% caller), so isolating it from whatever else shares cache_test_/0's
+%% table keeps these unambiguous.
+await_test_() ->
+    {setup, fun start/0, fun stop/1, fun(_) ->
+        [
+            fun await_returns_immediately_for_an_already_cached_answer/0,
+            fun await_times_out_when_nothing_arrives/0,
+            fun await_wakes_up_on_a_later_matching_insert/0,
+            fun await_is_not_woken_by_a_goodbye_with_nothing_left_to_report/0,
+            fun a_dead_waiting_caller_does_not_leak/0
         ]
     end}.
 
@@ -66,14 +80,62 @@ near_expiry_reports_soon_to_expire() ->
     ?assert(lists:member({"c.local", a}, mdns_cache:near_expiry(60))),
     ?assertNot(lists:member({"c.local", a}, mdns_cache:near_expiry(1))).
 
-subscriber_is_notified_on_insert() ->
-    ok = mdns_cache:await_subscribe("d.local", a),
-    ok = mdns_cache:insert_many([{"d.local", a, {10, 0, 0, 4}, 120, false}]),
+await_returns_immediately_for_an_already_cached_answer() ->
+    ok = mdns_cache:insert_many([{"await-hit.local", a, {10, 0, 0, 40}, 120, false}]),
+    ?assertMatch({ok, [{{10, 0, 0, 40}, _}]}, mdns_cache:await("await-hit.local", a, 1000)).
+
+await_times_out_when_nothing_arrives() ->
+    ?assertEqual({error, timeout}, mdns_cache:await("await-never-arrives.local", a, 100)).
+
+%% The whole point of await/3: block, and get woken up by a *later*
+%% insert - not polling, not a raw `receive` in the caller.
+await_wakes_up_on_a_later_matching_insert() ->
+    Self = self(),
+    spawn(fun() ->
+        Self ! {await_result, mdns_cache:await("await-wakes-up.local", a, 5000)}
+    end),
+    timer:sleep(100),
+    ok = mdns_cache:insert_many([{"await-wakes-up.local", a, {10, 0, 0, 41}, 120, false}]),
     receive
-        {mdns_answer, "d.local", a, [{{10, 0, 0, 4}, _}]} -> ok
+        {await_result, Result} ->
+            ?assertMatch({ok, [{{10, 0, 0, 41}, _}]}, Result)
     after 1000 ->
         ?assert(false)
     end.
+
+%% A goodbye (Ttl=0) for the name a caller is waiting on touches it, but
+%% leaves nothing to report - must not wake the waiter up with an empty
+%% answer; it should keep waiting until either a real answer arrives or
+%% it times out.
+await_is_not_woken_by_a_goodbye_with_nothing_left_to_report() ->
+    Self = self(),
+    spawn(fun() ->
+        Self ! {await_result, mdns_cache:await("await-goodbye-only.local", a, 300)}
+    end),
+    timer:sleep(50),
+    ok = mdns_cache:insert_many([{"await-goodbye-only.local", a, {10, 0, 0, 42}, 0, false}]),
+    receive
+        {await_result, Result} ->
+            ?assertEqual({error, timeout}, Result)
+    after 1000 ->
+        ?assert(false)
+    end.
+
+%% If the waiting process dies before an answer or its own timeout, the
+%% monitor-based cleanup must remove it rather than leaking it in state
+%% forever - sys:get_state/1 (not a shared record - the state record
+%% isn't exported via a header, so read positionally) is the standard
+%% way to check gen_server-internal state from a test.
+a_dead_waiting_caller_does_not_leak() ->
+    Pid = spawn(fun() -> mdns_cache:await("await-leak-check.local", a, infinity) end),
+    timer:sleep(50),
+    ?assertEqual(1, map_size(waiters_in_state())),
+    exit(Pid, kill),
+    timer:sleep(50),
+    ?assertEqual(0, map_size(waiters_in_state())).
+
+waiters_in_state() ->
+    element(2, sys:get_state(mdns_cache)).
 
 dump_reports_current_entries() ->
     ok = mdns_cache:insert_many([{"h.local", a, {10, 0, 0, 5}, 120, false}]),

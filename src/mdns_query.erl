@@ -26,9 +26,10 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 %% Resolve Name/Type, issuing an mDNS query and waiting up to TimeoutMs for
-%% an answer if it isn't already cached. Safe to call concurrently from
-%% many processes - each call waits in its own mailbox, no shared
-%% bottleneck.
+%% an answer if it isn't already cached (see mdns_cache:await/3 - this
+%% just fires the query and blocks on that). Safe to call concurrently
+%% from many processes - each call blocks in its own gen_server:call, no
+%% shared bottleneck.
 %%
 %% A name registered via mdns:register/2,3 is always answered from
 %% mdns_registry, never from mdns_cache: we're the authority on our own
@@ -49,23 +50,13 @@ resolve_from_cache(Name, Type, TimeoutMs) ->
         Answers -> {ok, Answers}
     end.
 
+%% mdns_cache:await/3 re-checks the cache itself before deciding to wait,
+%% so there's no race to get right here regardless of the order between
+%% these two calls - firing off the query first just means it has a
+%% head start.
 resolve_miss(Name, Type, TimeoutMs) ->
-    ok = mdns_cache:await_subscribe(Name, Type),
-    case mdns_cache:lookup(Name, Type) of
-        [] ->
-            mdns_socket:send_query(Name, Type),
-            Result =
-                receive
-                    {mdns_answer, Name, Type, Answers} -> {ok, Answers}
-                after TimeoutMs ->
-                    {error, timeout}
-                end,
-            mdns_cache:await_unsubscribe(Name, Type),
-            Result;
-        Answers ->
-            mdns_cache:await_unsubscribe(Name, Type),
-            {ok, Answers}
-    end.
+    mdns_socket:send_query(Name, Type),
+    mdns_cache:await(Name, Type, TimeoutMs).
 
 init([]) ->
     schedule_sweep(),

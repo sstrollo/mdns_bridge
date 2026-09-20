@@ -19,10 +19,11 @@
 %% bounding memory use against a noisy or adversarial network.
 %%
 %% Callers that want to be woken up when a not-yet-cached name appears
-%% (mdns_query's on-demand resolve) subscribe via await_subscribe/2 and
-%% then simply wait for a `{mdns_answer, Name, Type, Answers}` message in
-%% their own mailbox - notification happens inline with insert_many/1
-%% handling, in this process.
+%% (mdns_query's on-demand resolve) call await/3, a plain blocking
+%% gen_server:call: if nothing matches yet, this process registers the
+%% caller as a waiter (monitoring it, and setting a timer for TimeoutMs)
+%% and replies later, from insert_many/1's handling, via
+%% gen_server:reply/2 - no ETS, no raw `receive` in the caller.
 %% @end
 %%%-------------------------------------------------------------------
 -module(mdns_cache).
@@ -35,8 +36,7 @@
     insert_many/1,
     lookup/2,
     near_expiry/1,
-    await_subscribe/2,
-    await_unsubscribe/2,
+    await/3,
     dump/0,
     print/0,
     print/1
@@ -45,12 +45,21 @@
 
 -define(SERVER, ?MODULE).
 -define(TAB, mdns_cache_tab).
--define(WAITERS, mdns_cache_waiters).
 -define(SWEEP_INTERVAL_MS, 5000).
 -define(FLUSH_GRACE_MS, 1000).
 -define(DEFAULT_MAX_ENTRIES, 10000).
 
--record(state, {}).
+%% Keyed by the monitor ref watching that waiter's caller - doubles as
+%% the timer's identity, so both the 'DOWN' and the timeout message that
+%% can end a wait carry the exact key needed to find and remove it.
+-type waiter() :: #{
+    name := string(),
+    type := atom(),
+    from := gen_server:from(),
+    timer := reference() | undefined
+}.
+
+-record(state, {waiters = #{} :: #{reference() => waiter()}}).
 
 %% Entry as produced by mdns_proto:extract_answers/1.
 -type entry() :: {
@@ -68,8 +77,8 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 %% Synchronous: callers (mdns_socket, mostly) rely on the insert having
-%% landed - and any matching await_subscribe/2 waiter notified - before
-%% this returns.
+%% landed - and any matching await/3 waiter replied to - before this
+%% returns.
 -spec insert_many([entry()]) -> ok.
 insert_many(Entries) ->
     gen_server:call(?SERVER, {insert_many, Entries}).
@@ -98,15 +107,18 @@ near_expiry(WithinSeconds) ->
     ],
     lists:usort(Keys).
 
--spec await_subscribe(string(), atom()) -> ok.
-await_subscribe(Name, Type) ->
-    true = ets:insert(?WAITERS, {{Name, Type}, self()}),
-    ok.
-
--spec await_unsubscribe(string(), atom()) -> ok.
-await_unsubscribe(Name, Type) ->
-    ets:delete_object(?WAITERS, {{Name, Type}, self()}),
-    ok.
+%% Block until Name/Type has an answer - actively re-checked as new
+%% entries are inserted, not polled - or return {error, timeout} after
+%% TimeoutMs (or never, for `infinity`) if nothing shows up. A plain
+%% gen_server:call: if there's no answer yet, this process (not the
+%% caller) tracks the wait via a monitor on the caller and a timer, and
+%% replies later with gen_server:reply/2 once one of the three things
+%% that can end it happens - a matching insert, the timer, or the caller
+%% dying - so nothing needs an explicit unsubscribe.
+-spec await(string(), atom(), timeout()) ->
+    {ok, [{term(), non_neg_integer()}]} | {error, timeout}.
+await(Name, Type, TimeoutMs) ->
+    gen_server:call(?SERVER, {await, Name, Type, TimeoutMs}, infinity).
 
 %% Direct ETS read: every current, unexpired entry - for inspecting the
 %% cache from a shell (`rebar3 shell`) or a debug script. See print/0 for
@@ -170,7 +182,6 @@ print(IoDevice) ->
 
 init([]) ->
     ets:new(?TAB, [set, public, named_table, {read_concurrency, true}]),
-    ets:new(?WAITERS, [bag, public, named_table]),
     erlang:send_after(?SWEEP_INTERVAL_MS, self(), sweep),
     {ok, #state{}}.
 
@@ -179,9 +190,19 @@ handle_call({insert_many, Entries}, _From, State) ->
     FlushKeys = lists:usort([{Name, Type} || {Name, Type, _Data, _Ttl, true} <- Entries]),
     [flush_stale(Key, Now) || Key <- FlushKeys],
     Touched = lists:usort([store_entry(E, Now) || E <- Entries]),
-    [notify_waiters(Name, Type) || {Name, Type} <- Touched],
+    NewState = lists:foldl(fun notify_waiters/2, State, Touched),
     enforce_max_entries(),
-    {reply, ok, State};
+    {reply, ok, NewState};
+handle_call({await, Name, Type, TimeoutMs}, {FromPid, _Tag} = From, State) ->
+    case lookup(Name, Type) of
+        [] ->
+            Ref = erlang:monitor(process, FromPid),
+            Timer = schedule_await_timeout(TimeoutMs, Ref),
+            Waiter = #{name => Name, type => Type, from => From, timer => Timer},
+            {noreply, State#state{waiters = (State#state.waiters)#{Ref => Waiter}}};
+        Answers ->
+            {reply, {ok, Answers}, State}
+    end;
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
@@ -192,6 +213,25 @@ handle_info(sweep, State) ->
     expire_rows(),
     erlang:send_after(?SWEEP_INTERVAL_MS, self(), sweep),
     {noreply, State};
+handle_info({await_timeout, Ref}, State) ->
+    case maps:take(Ref, State#state.waiters) of
+        {#{from := From}, Waiters} ->
+            erlang:demonitor(Ref, [flush]),
+            gen_server:reply(From, {error, timeout}),
+            {noreply, State#state{waiters = Waiters}};
+        error ->
+            %% Already answered by a matching insert (which cancels the
+            %% timer, but the message can still be in transit) - ignore.
+            {noreply, State}
+    end;
+handle_info({'DOWN', Ref, process, _Pid, _Reason}, State) ->
+    case maps:take(Ref, State#state.waiters) of
+        {#{timer := Timer}, Waiters} ->
+            cancel_timer(Timer),
+            {noreply, State#state{waiters = Waiters}};
+        error ->
+            {noreply, State}
+    end;
 handle_info(_Msg, State) ->
     {noreply, State}.
 
@@ -234,15 +274,47 @@ store_entry({Name, Type, Data, Ttl, _CacheFlush}, Now) ->
         logger:debug("mdns_cache: added ~p/~p ~p (ttl=~p)", [Name, Type, Data, Ttl]),
     {Name, Type}.
 
-notify_waiters(Name, Type) ->
-    case ets:lookup(?WAITERS, {Name, Type}) of
+%% Answers and removes every waiter on {Name, Type}, if there's now
+%% something to tell them - a touch that turned out to be a deletion
+%% (a goodbye leaving nothing behind) wakes nobody up, since there's
+%% nothing new to report; those waiters keep waiting for a real answer
+%% or their own timeout.
+notify_waiters({Name, Type}, State) ->
+    case lookup(Name, Type) of
         [] ->
-            ok;
-        Waiters ->
-            Answers = lookup(Name, Type),
-            [Pid ! {mdns_answer, Name, Type, Answers} || {_, Pid} <- Waiters],
-            ets:delete(?WAITERS, {Name, Type})
+            State;
+        Answers ->
+            {Matching, Remaining} = maps:fold(
+                fun(Ref, #{name := N, type := T} = Waiter, {M, R}) ->
+                    case N =:= Name andalso T =:= Type of
+                        true -> {M#{Ref => Waiter}, R};
+                        false -> {M, R#{Ref => Waiter}}
+                    end
+                end,
+                {#{}, #{}},
+                State#state.waiters
+            ),
+            maps:foreach(
+                fun(Ref, #{from := From, timer := Timer}) ->
+                    cancel_timer(Timer),
+                    erlang:demonitor(Ref, [flush]),
+                    gen_server:reply(From, {ok, Answers})
+                end,
+                Matching
+            ),
+            State#state{waiters = Remaining}
     end.
+
+schedule_await_timeout(infinity, _Ref) ->
+    undefined;
+schedule_await_timeout(TimeoutMs, Ref) ->
+    erlang:send_after(TimeoutMs, self(), {await_timeout, Ref}).
+
+cancel_timer(undefined) ->
+    ok;
+cancel_timer(Timer) ->
+    erlang:cancel_timer(Timer),
+    ok.
 
 expire_rows() ->
     Now = now_ms(),

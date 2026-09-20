@@ -62,8 +62,11 @@ send_probe(Name, Type, Data, Ttl) ->
 %% Register the calling process to receive
 %% `{mdns_probe_seen, Name, Type, Data}' for every answer or competing
 %% probe seen on the wire for Name/Type - used by mdns_registry while
-%% probing a name (see its module doc). Direct ETS access, like
-%% mdns_cache's await_subscribe/2 - no need to go through the gen_server.
+%% probing a name (see its module doc). Direct ETS access - no need to
+%% go through the gen_server. Unlike mdns_cache:await/3, this genuinely
+%% needs a stream of every matching packet over the whole probe window,
+%% not just a single eventual answer, so a plain subscription (not a
+%% blocking call) is the right shape here.
 -spec probe_subscribe(string(), atom()) -> ok.
 probe_subscribe(Name, Type) ->
     true = ets:insert(?PROBE_WATCHERS, {{Name, Type}, self()}),
