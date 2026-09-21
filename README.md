@@ -120,9 +120,12 @@ a log level:
     ok
 
 `enable/1` takes an explicit `io:device()` (default `standard_io`) to
-print to, same idea as `mdns_cache:print/1`. Disabled tracing costs one
-do-nothing function call at each instrumented site - see `mdns_trace`'s
-module doc.
+print to, same idea as `mdns_cache:print/1`. Instrumented call sites use
+the `?TRACE(Kind, Info)` macro (`include/mdns_trace.hrl`), which checks
+`mdns_trace:enabled/0` (a cheap `persistent_term` read) before `Info` is
+even evaluated - a macro argument is just substituted text, so while
+tracing is off, an `Info` map/term isn't constructed at all, not merely
+built and discarded. See `mdns_trace`'s module doc.
 
 This app's own one-off `info` log messages (an interface join, an
 interface change) are unrelated to `mdns_trace` and still go through

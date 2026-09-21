@@ -21,18 +21,29 @@
 %%%-------------------------------------------------------------------
 -module(mdns_trace).
 
--export([enable/0, enable/1, disable/0, event/2]).
+-export([enable/0, enable/1, disable/0, enabled/0, event/2]).
 
 -define(SERVER, ?MODULE).
+-define(ENABLED_KEY, {?MODULE, enabled}).
 
 %% Call at each point that should be observable when tracing is
 %% enabled - Kind identifies the kind of event (an atom), Info carries
 %% whatever's relevant to it (a map, by convention, for legible trace
 %% output - see mdns_cache for examples). Does nothing on its own; see
-%% the moduledoc.
+%% the moduledoc. Most call sites should go through the ?TRACE(Kind,
+%% Info) macro (include/mdns_trace.hrl) instead of calling this
+%% directly, so Info isn't even constructed while tracing is off.
 -spec event(atom(), term()) -> ok.
 event(_Kind, _Info) ->
     ok.
+
+%% Cheap (a persistent_term read - no ETS, no message passing) check for
+%% whether tracing is currently on. This is what ?TRACE/2 guards on: it
+%% costs nothing worth worrying about to check, so an Info term that's
+%% only needed for tracing never has to be built while tracing is off.
+-spec enabled() -> boolean().
+enabled() ->
+    persistent_term:get(?ENABLED_KEY, false).
 
 %% Equivalent to enable(standard_io).
 -spec enable() -> ok.
@@ -48,10 +59,12 @@ enable(IoDevice) ->
     TracerPid = spawn(fun() -> tracer_init(IoDevice) end),
     erlang:trace_pattern({?MODULE, event, 2}, true, []),
     erlang:trace(all, true, [call, {tracer, TracerPid}]),
+    persistent_term:put(?ENABLED_KEY, true),
     ok.
 
 -spec disable() -> ok.
 disable() ->
+    persistent_term:erase(?ENABLED_KEY),
     erlang:trace(all, false, [call]),
     erlang:trace_pattern({?MODULE, event, 2}, false, []),
     case whereis(?SERVER) of

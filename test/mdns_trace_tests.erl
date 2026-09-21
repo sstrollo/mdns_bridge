@@ -1,13 +1,16 @@
 -module(mdns_trace_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include("mdns_trace.hrl").
 
 trace_test_() ->
     {foreach, fun start/0, fun stop/1, [
         fun disabled_by_default_produces_no_output/0,
         fun enabled_prints_every_event_to_the_given_device/0,
         fun disable_stops_further_output/0,
-        fun enable_again_with_a_different_device_moves_the_output/0
+        fun enable_again_with_a_different_device_moves_the_output/0,
+        fun enabled_reports_current_state/0,
+        fun trace_macro_does_not_construct_info_when_disabled/0
     ]}.
 
 start() ->
@@ -58,6 +61,42 @@ disable_stops_further_output() ->
     Text = read_and_delete(Path),
     ?assert(string:find(Text, "before_disable") =/= nomatch),
     ?assertEqual(nomatch, string:find(Text, "after_disable")).
+
+enabled_reports_current_state() ->
+    ?assertNot(mdns_trace:enabled()),
+    ok = mdns_trace:enable(),
+    ?assert(mdns_trace:enabled()),
+    ok = mdns_trace:disable(),
+    ?assertNot(mdns_trace:enabled()).
+
+%% The whole point of ?TRACE/2: Info must not even be *evaluated* while
+%% disabled, not merely have its result discarded - proven here with a
+%% side-effecting Info expression (sends a message to self()), not just
+%% by checking there's no printed output.
+trace_macro_does_not_construct_info_when_disabled() ->
+    Self = self(),
+    SideEffectingInfo = fun() ->
+        Self ! info_was_constructed,
+        #{}
+    end,
+    ?TRACE(some_kind, SideEffectingInfo()),
+    ?assertEqual(
+        no_message,
+        receive
+            info_was_constructed -> got_message
+        after 0 -> no_message
+        end
+    ),
+    ok = mdns_trace:enable(),
+    timer:sleep(20),
+    ?TRACE(some_kind, SideEffectingInfo()),
+    ?assertEqual(
+        got_message,
+        receive
+            info_was_constructed -> got_message
+        after 1000 -> no_message
+        end
+    ).
 
 enable_again_with_a_different_device_moves_the_output() ->
     Path1 = temp_path(),
