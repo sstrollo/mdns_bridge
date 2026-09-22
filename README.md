@@ -87,19 +87,10 @@ Try it:
 Inspecting the cache
 --------------------
 
-`mdns_cache:dump/0` returns every current, unexpired entry as a list of
-maps (`#{name, type, data, ttl_remaining, age}`); `mdns_cache:print/0`
-formats that to an `io:device()` (default `standard_io`; `print/1` takes
-one explicitly) - handy from `rebar3 shell`. Formatted for a human, not
-`~p` on whatever Erlang term each record type happens to use internally
-- an address via `inet:ntoa/1`, not a raw tuple; a PTR's target and each
-TXT string unquoted; a SRV's fields labeled; a multi-entry TXT record
-(a real device's can easily run to a couple dozen strings) one string
-per line instead of crammed onto the entry's own line. Columns are
-otherwise ragged, not fixed-width, on purpose - a fixed field width
-would silently truncate a long name (a reverse-DNS PTR query, a DNS-SD
-instance name - both common on a real network) rather than just
-misalign it:
+`mdns_cache:dump/0` returns every current, unexpired entry as a list
+of maps (`#{name, type, data, ttl_remaining, age}`), while
+`mdns_cache:print/0` formats that to an `io:device()` (default
+`standard_io`; `print/1` takes one explicitly) in a readable format.
 
     1> mdns_cache:print().
     my-printer.local a ttl=118 age=2 192.168.1.42
@@ -112,11 +103,8 @@ misalign it:
     4 entries
 
 Cache inserts, removals (goodbye packets, RFC 6762 10.2 cache-flush
-evictions, natural TTL expiry, and `cache_max_entries` cap evictions) are
-each individually too frequent on a busy network to leave on
-permanently, even at `debug` log level - instead, `mdns_trace` toggles
-watching them on demand, built on Erlang's own call-tracing rather than
-a log level:
+evictions, natural TTL expiry, and `cache_max_entries` cap evictions)
+can be followed on demand using `mdns_trace`, toggled on and off:
 
     1> mdns_trace:enable().
     ok
@@ -124,18 +112,10 @@ a log level:
     3> mdns_trace:disable().
     ok
 
-`enable/1` takes an explicit `io:device()` (default `standard_io`) to
-print to, same idea as `mdns_cache:print/1`. Instrumented call sites use
-the `?TRACE(Kind, Info)` macro (`include/mdns_trace.hrl`), which checks
-`mdns_trace:enabled/0` (a cheap `persistent_term` read) before `Info` is
-even evaluated - a macro argument is just substituted text, so while
-tracing is off, an `Info` map/term isn't constructed at all, not merely
-built and discarded. See `mdns_trace`'s module doc.
-
-This app's own one-off `info` log messages (an interface join, an
-interface change) are unrelated to `mdns_trace` and still go through
-`logger` as normal - OTP's default primary log level (`notice`) filters
-those out; raise it to see them, e.g. from the shell:
+Log messages at `info` level (an interface join, an interface change)
+go through `logger` as usual. OTP's default primary log level
+(`notice`) filters those out; raise it to see them, e.g. from the
+shell:
 
     1> logger:set_primary_config(level, info).
 
@@ -315,9 +295,9 @@ automatically re-probes and renames while running; react to
 `{mdns_bridge_conflict, Ref, Name}` and call `register/2,3` again if you
 want that.
 
-To skip probing entirely and claim a name immediately (today's original
-"trust the caller" behavior, no ~750ms wait), pass `#{probe => false}` -
-ongoing conflict defense still applies once registered either way.
+To skip probing entirely and claim a name immediately, pass
+`#{probe => false}` - ongoing conflict defense still applies once
+registered either way.
 
 One simplification worth knowing about: RFC 6762 8.2 covers two hosts
 probing the *identical* name at the *identical* instant, resolved by a
