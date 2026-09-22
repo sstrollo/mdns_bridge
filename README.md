@@ -67,12 +67,15 @@ Build
 Docs
 ----
 
+API docs (generated from each module's `-moduledoc`/`-doc` attributes):
+**https://sstrollo.github.io/mdns_bridge/**
+
+Published automatically to GitHub Pages on every push to `main` (see
+`.github/workflows/ci.yml`). To build the same thing locally:
+
     $ rebar3 ex_doc
 
-Generates HTML API docs (from each module's `-moduledoc`/`-doc`
-attributes) into `doc/` - open `doc/index.html` in a browser. Also
-published automatically to GitHub Pages on every push to `main` (see
-`.github/workflows/ci.yml`).
+This writes to `doc/` - open `doc/index.html` in a browser.
 
 Run
 ---
