@@ -9,6 +9,11 @@ resolution to plain unicast DNS - so anything that can talk DNS (a system
 resolver, an internal forwarder, or Erlang's own `inet_db`) can resolve
 `.local` names without speaking mDNS itself.
 
+_Note: this project is implemented with the help of AI - in the
+classical open source vein it is a project that I needed for something
+else, so I actually use it and intend to keep it maintained (with or
+without the help of AI)._
+
 Features
 --------
 
@@ -37,32 +42,21 @@ Features
 Status
 ------
 
-Learning/bridging (phase 1), publishing (phase 2, including probing,
-conflict policies, and ongoing conflict defense), and DNS-SD service
-publishing (RFC 6763) are implemented. The one deliberate simplification:
-RFC 6762 8.2's simultaneous-probe tie-breaking (two hosts probing the
-identical name at the identical instant, resolved by a lexicographic
-comparison) is treated as a plain conflict rather than implementing the
-actual tie-break comparison - see [Publishing names](#publishing-names).
+Learning/bridging, publishing, and DNS-SD service publishing (RFC
+6763) are implemented. The one deliberate simplification: RFC 6762
+8.2's simultaneous-probe tie-breaking (two hosts probing the identical
+name at the identical instant, resolved by a lexicographic comparison)
+is treated as a plain conflict rather than implementing the actual
+tie-break comparison - see [Publishing names](#publishing-names).
 
 Requirements
 ------------
 
-**OTP 27 or later** (CI tests 27-29). This is a hard requirement, not
-just what's tested: `inet_dns:encode/2` and `decode/2` - the two-argument
-forms that let a caller choose mDNS (`Mdns=true`) vs. classic
-(`Mdns=false`) framing, which this app relies on throughout, both for
-mDNS traffic and for the classic-DNS bridge - were only added to
-`inet_dns`'s exported API in OTP 27. Earlier versions only export
-`encode/1`/`decode/1`, which are hardcoded to `Mdns=true` internally with
-no supported way to ask for classic framing instead - so the classic-DNS
-bridge specifically cannot work correctly on OTP <27 via the public API.
-(Confirmed by CI: `mdns_proto_tests`'s `inet_dns` round-trip tests fail
-with `undef` on OTP 25/26, exactly as expected.)
+**OTP 27 or later** (CI tests 27-29).
 
-The mDNS (de)coding also relies on record shapes vendored from OTP's
-kernel-internal `inet_dns` module rather than reimplementing the wire
-format - see `CONTRIBUTING.md` for what that means if you're touching
+The mDNS (de)coding also relies on records from OTP's kernel-internal
+`inet_dns` module rather than reimplementing the wire format - see
+`CONTRIBUTING.md` for what that means if you're touching
 `include/mdns_dns.hrl`.
 
 Build
