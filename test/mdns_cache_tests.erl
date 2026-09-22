@@ -227,13 +227,14 @@ print_handles_every_record_shape_seen_on_a_real_lan() ->
     Text = binary_to_list(Bin),
     Needles = [
         "printer1._http._tcp.local",
-        %% nsec: decoded, not a raw dump. "types=a\n" (not just
-        %% "types=a") distinguishes this from a types=aaaa row nearby -
-        %% "types=a" alone would also match as its prefix. ttl isn't
-        %% checked exactly - it can tick down by 1 between insert and
-        %% print depending on timing.
+        %% nsec: the type column shows "nsec", not the bare 47 inet_dns
+        %% leaves it as, and the data is decoded, not a raw dump.
+        %% "types=a\n" (not just "types=a") distinguishes this from a
+        %% types=aaaa row nearby - "types=a" alone would also match as
+        %% its prefix. ttl isn't checked exactly - it can tick down by 1
+        %% between insert and print depending on timing.
         "types=txt,srv",
-        "anon-device.local 47 ttl=",
+        "anon-device.local nsec ttl=",
         "types=a\n",
         %% a/aaaa: a real address string via inet:ntoa/1, not a tuple
         "10.0.0.50",

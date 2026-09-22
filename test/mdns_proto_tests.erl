@@ -221,3 +221,22 @@ describe(Type, Data) ->
         {inline, IoData} -> {inline, iolist_to_binary(IoData)};
         {multiline, Entries} -> {multiline, [iolist_to_binary(E) || E <- Entries]}
     end.
+
+%% Used both for describe_nsec/1's type list and directly by
+%% mdns_cache:print/1 for the type column, so an atom inet_dns already
+%% recognizes (a, ptr, ...) and a bare integer it doesn't (like 47 -
+%% NSEC isn't one inet_dns maps to an atom) both need to come out
+%% right, and both as a binary, not a string() - see CLAUDE.md.
+type_name_test_() ->
+    [
+        ?_assertEqual(~"a", mdns_proto:type_name(a)),
+        ?_assertEqual(~"srv", mdns_proto:type_name(srv)),
+        ?_assert(is_binary(mdns_proto:type_name(a))),
+        ?_assertEqual(~"nsec", mdns_proto:type_name(47)),
+        ?_assertEqual(~"ptr", mdns_proto:type_name(12)),
+        %% a type number with no entry in the table at all
+        ?_assertEqual(~"1234", mdns_proto:type_name(1234)),
+        %% an atom inet_dns has never heard of either - still just its
+        %% own name, not a crash
+        ?_assertEqual(~"made_up_type", mdns_proto:type_name(made_up_type))
+    ].

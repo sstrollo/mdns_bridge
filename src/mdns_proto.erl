@@ -33,7 +33,8 @@
     service_type_name/1,
     service_instance_name/2,
     build_txt_data/1,
-    describe_data/2
+    describe_data/2,
+    type_name/1
 ]).
 
 -define(CLASS_IN, in).
@@ -270,7 +271,7 @@ describe_nsec(Data) ->
             case decode_nsec_windows(Rest, []) of
                 {ok, Types} ->
                     {inline, [
-                        <<"types=">>, lists:join(",", [type_name(T) || T <- Types])
+                        ~"types=", lists:join(~",", [type_name(T) || T <- Types])
                     ]};
                 error ->
                     {inline, io_lib:format("~0p", [Data])}
@@ -313,48 +314,55 @@ bitmap_types(Window, Bitmap) ->
         (Byte bsr (7 - BitIndex)) band 1 =:= 1
     ].
 
-%% Common DNS RR type numbers, for NSEC's type bitmap - falls back to
-%% the bare number for anything not worth naming here.
-type_name(1) -> "a";
-type_name(2) -> "ns";
-type_name(5) -> "cname";
-type_name(6) -> "soa";
-type_name(12) -> "ptr";
-type_name(13) -> "hinfo";
-type_name(15) -> "mx";
-type_name(16) -> "txt";
-type_name(17) -> "rp";
-type_name(24) -> "sig";
-type_name(25) -> "key";
-type_name(28) -> "aaaa";
-type_name(29) -> "loc";
-type_name(33) -> "srv";
-type_name(35) -> "naptr";
-type_name(36) -> "kx";
-type_name(37) -> "cert";
-type_name(39) -> "dname";
-type_name(41) -> "opt";
-type_name(43) -> "ds";
-type_name(44) -> "sshfp";
-type_name(45) -> "ipseckey";
-type_name(46) -> "rrsig";
-type_name(47) -> "nsec";
-type_name(48) -> "dnskey";
-type_name(50) -> "nsec3";
-type_name(51) -> "nsec3param";
-type_name(52) -> "tlsa";
-type_name(59) -> "cds";
-type_name(60) -> "cdnskey";
-type_name(61) -> "openpgpkey";
-type_name(64) -> "svcb";
-type_name(65) -> "https";
-type_name(99) -> "spf";
-type_name(249) -> "tkey";
-type_name(250) -> "tsig";
-type_name(255) -> "any";
-type_name(256) -> "uri";
-type_name(257) -> "caa";
-type_name(Other) -> integer_to_list(Other).
+%% A readable name for a DNS RR type, whether inet_dns already mapped it
+%% to an atom (a, ptr, srv, txt, ...) or it's still a bare integer -
+%% either used directly by describe_data/2's caller for the type column
+%% (see mdns_cache:print/1), or by describe_nsec/1 to name the types
+%% named in a bitmap, which are always bare integers regardless of
+%% whether inet_dns would otherwise recognize them. Falls back to the
+%% number itself (as text) for anything not worth naming here.
+-spec type_name(atom() | non_neg_integer()) -> binary().
+type_name(Type) when is_atom(Type) -> atom_to_binary(Type);
+type_name(1) -> ~"a";
+type_name(2) -> ~"ns";
+type_name(5) -> ~"cname";
+type_name(6) -> ~"soa";
+type_name(12) -> ~"ptr";
+type_name(13) -> ~"hinfo";
+type_name(15) -> ~"mx";
+type_name(16) -> ~"txt";
+type_name(17) -> ~"rp";
+type_name(24) -> ~"sig";
+type_name(25) -> ~"key";
+type_name(28) -> ~"aaaa";
+type_name(29) -> ~"loc";
+type_name(33) -> ~"srv";
+type_name(35) -> ~"naptr";
+type_name(36) -> ~"kx";
+type_name(37) -> ~"cert";
+type_name(39) -> ~"dname";
+type_name(41) -> ~"opt";
+type_name(43) -> ~"ds";
+type_name(44) -> ~"sshfp";
+type_name(45) -> ~"ipseckey";
+type_name(46) -> ~"rrsig";
+type_name(47) -> ~"nsec";
+type_name(48) -> ~"dnskey";
+type_name(50) -> ~"nsec3";
+type_name(51) -> ~"nsec3param";
+type_name(52) -> ~"tlsa";
+type_name(59) -> ~"cds";
+type_name(60) -> ~"cdnskey";
+type_name(61) -> ~"openpgpkey";
+type_name(64) -> ~"svcb";
+type_name(65) -> ~"https";
+type_name(99) -> ~"spf";
+type_name(249) -> ~"tkey";
+type_name(250) -> ~"tsig";
+type_name(255) -> ~"any";
+type_name(256) -> ~"uri";
+type_name(257) -> ~"caa";
+type_name(Other) when is_integer(Other) -> integer_to_binary(Other).
 
 %% Build a classic unicast-DNS response for the bridge server.
 %% Answers :: [{Data, Ttl}] for the queried Name/Type. Domain comes

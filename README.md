@@ -97,7 +97,7 @@ assertion - into a plain list of type names.
 
     1> mdns_cache:print().
     my-printer.local a ttl=118 age=2 192.168.1.42
-    my-printer.local 47 ttl=118 age=2 types=a
+    my-printer.local nsec ttl=118 age=2 types=a
     _http._tcp.local ptr ttl=4498 age=2 my printer._http._tcp.local
     my printer._http._tcp.local srv ttl=4498 age=2 priority=0 weight=0 port=631 target=my-printer.local
     my printer._http._tcp.local txt ttl=4498 age=2

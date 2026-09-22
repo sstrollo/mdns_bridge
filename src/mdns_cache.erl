@@ -162,8 +162,12 @@ print() ->
 %% TXT record is the one exception - see mdns_proto:describe_data/2),
 %% sorted by {Name, Type} for readability, and formatted for a human
 %% rather than an `~p` dump of whatever Erlang term each record type
-%% happens to use internally - see describe_data/2's own doc for what
-%% that means per type. Sets IoDevice's encoding to unicode first: a
+%% happens to use internally: Type itself goes through
+%% mdns_proto:type_name/1 (a name whether inet_dns already mapped it to
+%% an atom or not - e.g. an NSEC row's Type shows as `nsec`, not the
+%% bare `47` inet_dns leaves it as), and Data goes through
+%% describe_data/2 - see its own doc for what that means per type. Sets
+%% IoDevice's encoding to unicode first: a
 %% real name/TXT string is very often non-ASCII (RFC 6763 explicitly
 %% allows UTF-8), and printing via ~ts without this can come out *worse*
 %% than plain ~s would - on a device left at Erlang's `latin1` default
@@ -193,7 +197,7 @@ print(IoDevice) ->
     io:format(IoDevice, "~b entries\n", [length(Entries)]).
 
 print_entry(IoDevice, #{name := Name, type := Type, data := Data, ttl_remaining := Ttl, age := Age}) ->
-    Header = io_lib:format("~ts ~0p ttl=~b age=~b", [Name, Type, Ttl, Age]),
+    Header = io_lib:format("~ts ~ts ttl=~b age=~b", [Name, mdns_proto:type_name(Type), Ttl, Age]),
     case mdns_proto:describe_data(Type, Data) of
         {inline, Formatted} ->
             io:format(IoDevice, "~ts ~ts\n", [Header, Formatted]);
