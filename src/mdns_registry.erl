@@ -1,69 +1,69 @@
-%%%-------------------------------------------------------------------
-%% @doc Registry of names published via the mdns:register/2,3 (plain
-%% hostnames) and mdns:register_service/5,6 (DNS-SD, RFC 6763) APIs, and
-%% announced over mDNS. A registration is tied to the lifetime of the
-%% calling process: if it dies without unregistering, we send a goodbye
-%% (TTL=0) and clean up automatically.
-%%
-%% Implements RFC 6762 sections 8 and 9:
-%%
-%% - Probing (8.1): before claiming a name, register/2,3 and
-%%   register_service/5,6 (in the calling process, not this gen_server -
-%%   probing takes real time, at least ~750ms for three probes 250ms
-%%   apart, and must not block every other registration attempt while it
-%%   runs) send probe queries and listen for a conflicting answer or a
-%%   competing simultaneous probe. A service registration probes its SRV
-%%   and TXT records sequentially rather than as a single combined
-%%   RFC 6762-recommended ANY-type probe - simpler, and since nothing is
-%%   committed until both clear, still fully correct, just ~1.5s instead
-%%   of ~750ms on the (presumably rarer) service-registration path.
-%%   Simultaneous-probe tie-breaking (8.2, the lexicographic-comparison
-%%   corner case for two hosts probing the identical name at the
-%%   identical instant) is deliberately simplified to "treat it as a
-%%   conflict" rather than implementing the full comparison - the case is
-%%   rare, and a real comparison algorithm is a lot of surface area for it.
-%% - Announcing (8.3): unchanged from before - an immediate announce, a
-%%   follow-up ~1s later, then periodic keep-alives.
-%% - Ongoing conflict defense (9): while a name is held, if some other
-%%   host starts answering for it with different data (mdns_socket
-%%   notifies us via notify_conflict/3), we reassert our own data once;
-%%   if the same conflict recurs within ?DEFEND_GRACE_MS, we give up -
-%%   withdraw every registration under that {Name, Type} (for a service,
-%%   this means the whole service - SRV/TXT/PTR/meta-PTR contribution,
-%%   not just whichever record type the conflict showed up on) and send
-%%   each owning process `{mdns_bridge_conflict, Ref, Name}` - unless any
-%%   of them registered with `on_conflict => force`, in which case we
-%%   just keep defending forever. Conflict scope is {Name, Type} as a
-%%   whole, not per individual registration, since this registry allows
-%%   more than one registration to legitimately share a name
-%%   (round-robin) and there's no way to tell "an external squatter" from
-%%   "our own other registration" apart from data already being one of
-%%   our own values.
-%%
-%% What a detected conflict (probe-time or ongoing) actually does is the
-%% `on_conflict` option: `error` (fail/withdraw - the default), `force`
-%% (claim/keep it regardless), `{rename, Fun}` (probe-time only: call
-%% `Fun(OriginalName, Attempt)` for a new name and retry, up to
-%% max_rename_attempts - always the *original* name, not the previous
-%% attempt's, so a plain "append -Attempt" Fun produces "foo-1", "foo-2",
-%% ... rather than compounding into "foo-1-2-3"; for a service, `Name` is
-%% the plain instance label, not the full dotted name), or `auto`
-%% (shorthand for exactly that Fun).
-%%
-%% DNS-SD service registration publishes, atomically under one
-%% reference: a SRV + TXT record at the instance name (RFC 6763 4.1,
-%% probed/unique, like a host's A record), a PTR from the service type
-%% name to the instance name (4.1, shared - never probed, multiple
-%% instances of one type are the normal case), and increments a
-%% reference count towards a PTR from `_services._dns-sd._udp.local` to
-%% the service type name (9, the "what service types exist at all"
-%% meta-enumeration record) - withdrawn only once nothing references
-%% that service type anymore. The SRV target host does not need to have
-%% been registered via mdns:register/2,3 itself - any `.local` name is
-%% accepted.
-%% @end
-%%%-------------------------------------------------------------------
 -module(mdns_registry).
+
+-moduledoc """
+Registry of names published via the `mdns:register/2,3` (plain
+hostnames) and `mdns:register_service/5,6` (DNS-SD, RFC 6763) APIs, and
+announced over mDNS. A registration is tied to the lifetime of the
+calling process: if it dies without unregistering, we send a goodbye
+(TTL=0) and clean up automatically.
+
+Implements RFC 6762 sections 8 and 9:
+
+- Probing (8.1): before claiming a name, `register/2,3` and
+  `register_service/5,6` (in the calling process, not this gen_server -
+  probing takes real time, at least ~750ms for three probes 250ms
+  apart, and must not block every other registration attempt while it
+  runs) send probe queries and listen for a conflicting answer or a
+  competing simultaneous probe. A service registration probes its SRV
+  and TXT records sequentially rather than as a single combined
+  RFC 6762-recommended ANY-type probe - simpler, and since nothing is
+  committed until both clear, still fully correct, just ~1.5s instead
+  of ~750ms on the (presumably rarer) service-registration path.
+  Simultaneous-probe tie-breaking (8.2, the lexicographic-comparison
+  corner case for two hosts probing the identical name at the
+  identical instant) is deliberately simplified to "treat it as a
+  conflict" rather than implementing the full comparison - the case is
+  rare, and a real comparison algorithm is a lot of surface area for it.
+- Announcing (8.3): unchanged from before - an immediate announce, a
+  follow-up ~1s later, then periodic keep-alives.
+- Ongoing conflict defense (9): while a name is held, if some other
+  host starts answering for it with different data (`mdns_socket`
+  notifies us via `notify_conflict/3`), we reassert our own data once;
+  if the same conflict recurs within `?DEFEND_GRACE_MS`, we give up -
+  withdraw every registration under that `{Name, Type}` (for a service,
+  this means the whole service - SRV/TXT/PTR/meta-PTR contribution,
+  not just whichever record type the conflict showed up on) and send
+  each owning process `{mdns_bridge_conflict, Ref, Name}` - unless any
+  of them registered with `on_conflict => force`, in which case we
+  just keep defending forever. Conflict scope is `{Name, Type}` as a
+  whole, not per individual registration, since this registry allows
+  more than one registration to legitimately share a name
+  (round-robin) and there's no way to tell "an external squatter" from
+  "our own other registration" apart from data already being one of
+  our own values.
+
+What a detected conflict (probe-time or ongoing) actually does is the
+`on_conflict` option: `error` (fail/withdraw - the default), `force`
+(claim/keep it regardless), `{rename, Fun}` (probe-time only: call
+`Fun(OriginalName, Attempt)` for a new name and retry, up to
+`max_rename_attempts` - always the *original* name, not the previous
+attempt's, so a plain "append -Attempt" Fun produces "foo-1", "foo-2",
+... rather than compounding into "foo-1-2-3"; for a service, `Name` is
+the plain instance label, not the full dotted name), or `auto`
+(shorthand for exactly that Fun).
+
+DNS-SD service registration publishes, atomically under one
+reference: a SRV + TXT record at the instance name (RFC 6763 4.1,
+probed/unique, like a host's A record), a PTR from the service type
+name to the instance name (4.1, shared - never probed, multiple
+instances of one type are the normal case), and increments a
+reference count towards a PTR from `_services._dns-sd._udp.local` to
+the service type name (9, the "what service types exist at all"
+meta-enumeration record) - withdrawn only once nothing references
+that service type anymore. The SRV target host does not need to have
+been registered via `mdns:register/2,3` itself - any `.local` name is
+accepted.
+""".
 
 -behaviour(gen_server).
 
@@ -150,11 +150,13 @@ child_spec() ->
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
+-doc "See `mdns:register/2`.".
 -spec register(string() | binary(), inet:ip4_address()) ->
     {ok, reference(), binary()} | {error, term()}.
 register(Name, Ip) ->
     register(Name, Ip, #{}).
 
+-doc "See `mdns:register/3`.".
 -spec register(string() | binary(), inet:ip4_address(), opts()) ->
     {ok, reference(), binary()} | {error, term()}.
 register(Name, Ip, Opts) when is_map(Opts) ->
@@ -170,6 +172,7 @@ register(Name, Ip, Opts) when is_map(Opts) ->
             Err
     end.
 
+-doc "See `mdns:register_service/5`.".
 -spec register_service(
     string() | binary(),
     string() | binary(),
@@ -180,6 +183,7 @@ register(Name, Ip, Opts) when is_map(Opts) ->
 register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost) ->
     register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost, #{}).
 
+-doc "See `mdns:register_service/6`.".
 -spec register_service(
     string() | binary(),
     string() | binary(),
@@ -209,11 +213,12 @@ register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost, Opts) when
             end
     end.
 
+-doc "See `mdns:unregister/1`.".
 -spec unregister(reference()) -> ok.
 unregister(Ref) ->
     gen_server:call(?SERVER, {unregister, Ref}).
 
-%% Direct ETS read: current {Data, Ttl} answers for a published Name/Type.
+-doc "Current `{Data, Ttl}` answers for a published Name/Type - a direct table read.".
 -spec answers_for(binary(), atom()) -> [{term(), non_neg_integer()}].
 answers_for(Name, Type) ->
     [
@@ -221,16 +226,20 @@ answers_for(Name, Type) ->
      || [Data, Ttl] <- ets:match(?TAB, {{Name, Type, '$1'}, #{ttl => '$2'}})
     ].
 
-%% mdns_socket calls this (RFC 6762 section 9) when it sees an answer for
-%% Name/Type whose Data doesn't match any of our own current values.
+-doc """
+Called by `mdns_socket` (RFC 6762 section 9) when it sees an answer
+for Name/Type whose Data doesn't match any of our own current values.
+""".
 -spec notify_conflict(binary(), atom(), term()) -> ok.
 notify_conflict(Name, Type, Data) ->
     gen_server:cast(?SERVER, {conflict, Name, Type, Data}).
 
-%% Call when the embedding system detects that the configured
-%% interface's address or netmask changed (e.g. a DHCP renewal) - this
-%% app does not watch for that itself. Revalidates future registrations
-%% against the new subnet; existing registrations are unaffected.
+-doc """
+Call when the embedding system detects that the configured
+interface's address or netmask changed (e.g. a DHCP renewal) - this
+app does not watch for that itself. Revalidates future registrations
+against the new subnet; existing registrations are unaffected.
+""".
 -spec refresh_interface() -> ok | {error, term()}.
 refresh_interface() ->
     gen_server:call(?SERVER, refresh_interface).

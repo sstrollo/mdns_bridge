@@ -1,9 +1,6 @@
-%%%-------------------------------------------------------------------
-%% @doc mdns top level supervisor.
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(mdns_sup).
+
+-moduledoc "Top-level supervisor.".
 
 -behaviour(supervisor).
 

@@ -1,31 +1,31 @@
-%%%-------------------------------------------------------------------
-%% @doc Classic unicast-DNS bridge for the `.local` domain. Listens on a
-%% plain UDP port (not 53, not 5353) and answers A/PTR/SRV/TXT queries
-%% from mdns_cache/mdns_query - this is the socket an upstream resolver
-%% (e.g. dnsmasq, systemd-resolved, or Erlang's own inet_db - see the
-%% README) forwards `.local` queries to.
-%%
-%% For anything outside `.local` we deliberately reply NOERROR with an
-%% empty answer section rather than REFUSED. That's not just politeness:
-%% OTP's inet_res only falls back from its `nameservers` list to its
-%% `alt_nameservers` list on NXDOMAIN or on an empty-but-OK answer, never
-%% on REFUSED (see inet_res:query_nss_result/9 and res_query/5 in the
-%% kernel app). Replying REFUSED would make this server usable as a
-%% `.local`-only bridge but permanently break split-horizon setups that
-%% put it in `nameservers` and a real resolver in `alt_nameservers`.
-%%
-%% Each request is handled in its own short-lived process so a slow
-%% on-demand mDNS lookup for one query can't stall others - but that
-%% means an unbounded flood of inbound packets would spawn an unbounded
-%% number of processes, and each cache-miss `.local` query also puts a
-%% multicast mDNS query out onto the LAN. dns_rate_limit_per_second caps
-%% how many requests we'll actually act on per second (the rest are
-%% simply dropped, same as a lost UDP packet); anyone who can reach this
-%% port cannot use it to cheaply flood the multicast segment or exhaust
-%% the process table beyond that budget.
-%% @end
-%%%-------------------------------------------------------------------
 -module(mdns_dns_server).
+
+-moduledoc """
+Classic unicast-DNS bridge for the `.local` domain. Listens on a
+plain UDP port (not 53, not 5353) and answers A/PTR/SRV/TXT queries
+from `mdns_cache`/`mdns_query` - this is the socket an upstream
+resolver (e.g. dnsmasq, systemd-resolved, or Erlang's own `inet_db` -
+see the README) forwards `.local` queries to.
+
+For anything outside `.local` we deliberately reply NOERROR with an
+empty answer section rather than REFUSED. That's not just politeness:
+OTP's `inet_res` only falls back from its `nameservers` list to its
+`alt_nameservers` list on NXDOMAIN or on an empty-but-OK answer, never
+on REFUSED (see `inet_res:query_nss_result/9` and `res_query/5` in the
+kernel app). Replying REFUSED would make this server usable as a
+`.local`-only bridge but permanently break split-horizon setups that
+put it in `nameservers` and a real resolver in `alt_nameservers`.
+
+Each request is handled in its own short-lived process so a slow
+on-demand mDNS lookup for one query can't stall others - but that
+means an unbounded flood of inbound packets would spawn an unbounded
+number of processes, and each cache-miss `.local` query also puts a
+multicast mDNS query out onto the LAN. `dns_rate_limit_per_second`
+caps how many requests we'll actually act on per second (the rest are
+simply dropped, same as a lost UDP packet); anyone who can reach this
+port cannot use it to cheaply flood the multicast segment or exhaust
+the process table beyond that budget.
+""".
 
 -behaviour(gen_server).
 
@@ -100,7 +100,7 @@ handle_info(reset_rate_counter, State) ->
 handle_info(_Msg, State) ->
     {noreply, State}.
 
-%% Pure so it's unit-testable without a real socket or timing.
+-doc "Whether a request should be accepted given RateLimit and the current window's Count so far.".
 -spec should_accept(pos_integer() | infinity, non_neg_integer()) -> boolean().
 should_accept(infinity, _Count) -> true;
 should_accept(RateLimit, Count) -> Count < RateLimit.
@@ -121,6 +121,7 @@ handle_query(Socket, SrcIp, SrcPort, Packet) ->
             ok
     end.
 
+-doc "Build the DNS response for query Q of request Req.".
 build_response(Req, #dns_query{domain = Domain, type = Type}) ->
     Name = mdns_proto:normalize_name(Domain),
     case mdns_proto:is_local(Name) andalso lists:member(Type, ?SUPPORTED_TYPES) of

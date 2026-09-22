@@ -1,36 +1,36 @@
-%%%-------------------------------------------------------------------
-%% @doc In-memory cache of records learned from mDNS traffic.
-%%
-%% Storage is a public ETS table keyed by {Name, Type, Data} so reads
-%% (lookup/2, near_expiry/1) never have to go through the gen_server -
-%% only inserts and the expiry sweep are serialized through this process.
-%%
-%% Implements RFC 6762 10.2 cache-flush semantics: an inserted record
-%% with the cache-flush bit set replaces other records for the same
-%% {Name, Type} that are more than ?FLUSH_GRACE_MS old (a short grace
-%% window, so a single flush that spans more than one packet - e.g.
-%% several round-robin A records announced together - doesn't have its
-%% own records race-delete each other). Without this, conflicting
-%% records for the same name accumulate forever and anyone on the
-%% network can add a competing answer alongside a legitimate one.
-%%
-%% Also enforces a configurable cache_max_entries: once over the cap,
-%% the oldest entries (by insertion time) are evicted to make room,
-%% bounding memory use against a noisy or adversarial network.
-%%
-%% Callers that want to be woken up when a not-yet-cached name appears
-%% (mdns_query's on-demand resolve) call await/3, a plain blocking
-%% gen_server:call: if nothing matches yet, this process registers the
-%% caller as a waiter (monitoring it, and setting a timer for TimeoutMs)
-%% and replies later, from insert_many/1's handling, via
-%% gen_server:reply/2 - no ETS, no raw `receive` in the caller.
-%%
-%% Every insert/removal/eviction is instrumented via ?TRACE/2
-%% - too frequent to leave on at `debug' log level permanently on a busy
-%% network, but toggleable on demand with mdns_trace:enable/0,1.
-%% @end
-%%%-------------------------------------------------------------------
 -module(mdns_cache).
+
+-moduledoc """
+In-memory cache of records learned from mDNS traffic.
+
+Storage is a public ETS table keyed by `{Name, Type, Data}` so reads
+(`lookup/2`, `near_expiry/1`) never have to go through the gen_server -
+only inserts and the expiry sweep are serialized through this process.
+
+Implements RFC 6762 10.2 cache-flush semantics: an inserted record
+with the cache-flush bit set replaces other records for the same
+`{Name, Type}` that are more than `?FLUSH_GRACE_MS` old (a short grace
+window, so a single flush that spans more than one packet - e.g.
+several round-robin A records announced together - doesn't have its
+own records race-delete each other). Without this, conflicting
+records for the same name accumulate forever and anyone on the
+network can add a competing answer alongside a legitimate one.
+
+Also enforces a configurable `cache_max_entries`: once over the cap,
+the oldest entries (by insertion time) are evicted to make room,
+bounding memory use against a noisy or adversarial network.
+
+Callers that want to be woken up when a not-yet-cached name appears
+(`mdns_query`'s on-demand resolve) call `await/3`, a plain blocking
+`gen_server:call`: if nothing matches yet, this process registers the
+caller as a waiter (monitoring it, and setting a timer for `TimeoutMs`)
+and replies later, from `insert_many/1`'s handling, via
+`gen_server:reply/2` - no ETS, no raw `receive` in the caller.
+
+Every insert/removal/eviction is instrumented via `?TRACE/2`
+- too frequent to leave on at `debug` log level permanently on a busy
+network, but toggleable on demand with `mdns_trace:enable/0,1`.
+""".
 
 -behaviour(gen_server).
 
@@ -82,14 +82,20 @@ child_spec() ->
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
-%% Synchronous: callers (mdns_socket, mostly) rely on the insert having
-%% landed - and any matching await/3 waiter replied to - before this
-%% returns.
+-doc """
+Insert Entries into the cache, applying RFC 6762 10.2 cache-flush and
+`cache_max_entries` eviction. Synchronous: callers (`mdns_socket`,
+mostly) rely on the insert having landed - and any matching `await/3`
+waiter replied to - before this returns.
+""".
 -spec insert_many([entry()]) -> ok.
 insert_many(Entries) ->
     gen_server:call(?SERVER, {insert_many, Entries}).
 
-%% Direct ETS read: current, unexpired {Data, RemainingTtlSeconds} answers.
+-doc """
+Current, unexpired `{Data, RemainingTtlSeconds}` answers for Name/Type
+- a direct table read, no gen_server round-trip.
+""".
 -spec lookup(binary(), atom()) -> [{term(), non_neg_integer()}].
 lookup(Name, Type) ->
     Now = now_ms(),
@@ -99,8 +105,10 @@ lookup(Name, Type) ->
         ExpiresAt > Now
     ].
 
-%% {Name, Type} pairs with at least one unexpired entry due to expire
-%% within WithinSeconds - candidates for proactive refresh.
+-doc """
+`{Name, Type}` pairs with at least one unexpired entry due to expire
+within WithinSeconds - candidates for proactive refresh.
+""".
 -spec near_expiry(non_neg_integer()) -> [{binary(), atom()}].
 near_expiry(WithinSeconds) ->
     Now = now_ms(),
@@ -113,32 +121,26 @@ near_expiry(WithinSeconds) ->
     ],
     lists:usort(Keys).
 
-%% Block until Name/Type has an answer - actively re-checked as new
-%% entries are inserted, not polled - or return {error, timeout} after
-%% TimeoutMs (or never, for `infinity`) if nothing shows up. A plain
-%% gen_server:call: if there's no answer yet, this process (not the
-%% caller) tracks the wait via a monitor on the caller and a timer, and
-%% replies later with gen_server:reply/2 once one of the three things
-%% that can end it happens - a matching insert, the timer, or the caller
-%% dying - so nothing needs an explicit unsubscribe.
+-doc """
+Block until Name/Type has an answer, or return `{error, timeout}`
+after TimeoutMs (or never, for `infinity`) if nothing shows up -
+actively woken by a matching insert as soon as one lands, not polled.
+""".
 -spec await(binary(), atom(), timeout()) ->
     {ok, [{term(), non_neg_integer()}]} | {error, timeout}.
 await(Name, Type, TimeoutMs) ->
     gen_server:call(?SERVER, {await, Name, Type, TimeoutMs}, infinity).
 
-%% Direct ETS read: every current, unexpired entry - for inspecting the
-%% cache from a shell (`rebar3 shell`) or a debug script. See print/0 for
-%% a version that just formats this to stdout.
--spec dump() ->
-    [
-        #{
-            name := binary(),
-            type := atom(),
-            data := term(),
-            ttl_remaining := non_neg_integer(),
-            age := non_neg_integer()
-        }
-    ].
+-type cached_record() :: #{
+    name := binary(),
+    type := atom(),
+    data := term(),
+    ttl_remaining := non_neg_integer(),
+    age := non_neg_integer()
+}.
+
+-doc "Return every current unexpired entry in the cache (for debugging).".
+-spec dump() -> [cached_record()].
 dump() ->
     Now = now_ms(),
     [
@@ -153,39 +155,31 @@ dump() ->
         ExpiresAt > Now
     ].
 
-%% Equivalent to print(standard_io).
+-doc "Equivalent to `print(standard_io)`.".
 -spec print() -> ok.
 print() ->
     print(standard_io).
 
-%% Prints dump/0's result to IoDevice, one entry per line (a multi-entry
-%% TXT record is the one exception - see mdns_proto:describe_data/2),
-%% sorted by {Name, Type} for readability, and formatted for a human
-%% rather than an `~p` dump of whatever Erlang term each record type
-%% happens to use internally: Type itself goes through
-%% mdns_proto:type_name/1 (a name whether inet_dns already mapped it to
-%% an atom or not - e.g. an NSEC row's Type shows as `nsec`, not the
-%% bare `47` inet_dns leaves it as), and Data goes through
-%% describe_data/2 - see its own doc for what that means per type. Sets
-%% IoDevice's encoding to unicode first: a
-%% real name/TXT string is very often non-ASCII (RFC 6763 explicitly
-%% allows UTF-8), and printing via ~ts without this can come out *worse*
-%% than plain ~s would - on a device left at Erlang's `latin1` default
-%% (which an explicitly-opened file always is, and even `standard_io`
-%% is when the locale isn't configured for UTF-8), ~ts actively replaces
-%% multi-byte characters with `?` on the way out, where plain ~s's
-%% "dumb" byte-for-byte passthrough would at least have left valid UTF-8
-%% bytes for the terminal to render correctly by luck. Best-effort -
-%% ignored if IoDevice doesn't support setopts/2.
-%%
-%% Deliberately no fixed-width columns: io_lib's ~s/~w *truncate* (to a
-%% row of `*`s, for ~w) a value wider than its given field width rather
-%% than just leaving it unaligned - real names on a real network (a
-%% reverse-DNS PTR query, a DNS-SD instance name) regularly are, and
-%% silently losing part of a name defeats the entire point of a
-%% debugging tool. Ragged columns beat truncated data.
+-doc """
+Print `dump/0`'s result to IoDevice, one entry per line (a multi-entry
+TXT record is the exception - see `mdns_proto:describe_data/2`),
+sorted by `{Name, Type}`. Type is rendered via
+`mdns_proto:type_name/1` (e.g. an NSEC row's Type shows as `nsec`, not
+the bare `47` `inet_dns` leaves it as), and Data via
+`mdns_proto:describe_data/2`. Sets IoDevice's encoding to UTF-8 first
+(best-effort - ignored if IoDevice doesn't support `setopts/2`), since
+a real name/TXT string is very often non-ASCII (RFC 6763 explicitly
+allows UTF-8). Columns are not fixed-width: a name can be arbitrarily
+wide, and this is a debugging tool, so nothing is truncated to fit.
+""".
 -spec print(io:device()) -> ok.
 print(IoDevice) ->
+    %% ~ts on a device still at Erlang's `latin1` default (which an
+    %% explicitly-opened file always is, and even standard_io is when the
+    %% locale isn't UTF-8-configured) replaces multi-byte characters with
+    %% "?" - worse than plain ~s's dumb byte-for-byte passthrough, which
+    %% would at least leave valid UTF-8 bytes for the terminal to render
+    %% correctly. Hence setting the encoding explicitly before using ~ts.
     _ = io:setopts(IoDevice, [{encoding, unicode}]),
     Entries = lists:sort(
         fun(#{name := N1, type := T1}, #{name := N2, type := T2}) ->

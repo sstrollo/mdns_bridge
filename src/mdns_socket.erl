@@ -1,23 +1,24 @@
-%%%-------------------------------------------------------------------
-%% @doc Owns the mDNS multicast UDP socket (224.0.0.251:5353). Decodes
-%% inbound packets: feeds any answer records into mdns_cache, flags any
-%% answer that conflicts with something mdns_registry has published
-%% (ongoing conflict defense, RFC 6762 section 9), answers any question
-%% that matches something mdns_registry has published, and notifies any
-%% probe watchers (mdns_registry's RFC 6762 section 8 probing) of
-%% matching answers or competing simultaneous probes.
-%%
-%% Exposes send_query/2 (mdns_query's active querying), announce/3
-%% (mdns_registry's announcements, reactive answers, and goodbyes),
-%% send_probe/4 and probe_subscribe/2 + probe_unsubscribe/2 (mdns_registry's
-%% probing - see its module doc). Probe watchers live in this process's
-%% own state (a map, monitoring each subscriber so a caller that crashes
-%% mid-probe doesn't leak its entry) rather than a separate ETS table -
-%% subscribe/unsubscribe happen once per probe, nowhere near hot enough
-%% to need direct ETS access instead of going through the gen_server.
-%% @end
-%%%-------------------------------------------------------------------
 -module(mdns_socket).
+
+-moduledoc """
+Owns the mDNS multicast UDP socket (224.0.0.251:5353). Decodes
+inbound packets: feeds any answer records into `mdns_cache`, flags any
+answer that conflicts with something `mdns_registry` has published
+(ongoing conflict defense, RFC 6762 section 9), answers any question
+that matches something `mdns_registry` has published, and notifies any
+probe watchers (`mdns_registry`'s RFC 6762 section 8 probing) of
+matching answers or competing simultaneous probes.
+
+Exposes `send_query/2` (`mdns_query`'s active querying), `announce/3`
+(`mdns_registry`'s announcements, reactive answers, and goodbyes),
+`send_probe/4` and `probe_subscribe/2` + `probe_unsubscribe/2`
+(`mdns_registry`'s probing - see its module doc). Probe watchers live
+in this process's own state (a map, monitoring each subscriber so a
+caller that crashes mid-probe doesn't leak its entry) rather than a
+separate ETS table - subscribe/unsubscribe happen once per probe,
+nowhere near hot enough to need direct ETS access instead of going
+through the gen_server.
+""".
 
 -behaviour(gen_server).
 
@@ -56,45 +57,47 @@ child_spec() ->
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
+-doc "Multicast an mDNS query for Type records of Name.".
 -spec send_query(binary(), atom()) -> ok.
 send_query(Name, Type) ->
     gen_server:cast(?SERVER, {send_query, Name, Type}).
 
-%% Multicast an mDNS answer for Name/Type: an announce, a reactive
-%% response, or (with a Ttl of 0 in Answers) a goodbye.
+-doc """
+Multicast an mDNS answer for Name/Type: an announce, a reactive
+response, or (with a Ttl of 0 in Answers) a goodbye.
+""".
 -spec announce(binary(), atom(), [{term(), non_neg_integer()}]) -> ok.
 announce(Name, Type, Answers) ->
     gen_server:cast(?SERVER, {announce, Name, Type, Answers}).
 
-%% Multicast an RFC 6762 8.1 probe for Name/Type/Data.
+-doc "Multicast an RFC 6762 8.1 probe for Name/Type/Data.".
 -spec send_probe(binary(), atom(), term(), non_neg_integer()) -> ok.
 send_probe(Name, Type, Data, Ttl) ->
     gen_server:cast(?SERVER, {send_probe, Name, Type, Data, Ttl}).
 
-%% Register the calling process to receive
-%% `{mdns_probe_seen, Name, Type, Data}' for every answer or competing
-%% probe seen on the wire for Name/Type - used by mdns_registry while
-%% probing a name (see its module doc). Unlike mdns_cache:await/3, this
-%% genuinely needs a stream of every matching packet over the whole
-%% probe window, not just a single eventual answer, so a plain
-%% subscription - not a blocking wait - is the right shape here; the
-%% messages still land directly in the caller's own mailbox, exactly as
-%% before. A gen_server:call, not a cast: the caller needs to know the
-%% subscription has actually taken effect before it starts probing (and,
-%% for unsubscribe, that no further message can arrive) - the same
-%% synchronous guarantee direct ETS access used to give for free.
+-doc """
+Register the calling process to receive
+`{mdns_probe_seen, Name, Type, Data}` for every answer or competing
+probe seen on the wire for Name/Type, until `probe_unsubscribe/2` is
+called - used by `mdns_registry` while probing a name (see its module
+doc). The caller's subscription has taken effect by the time this
+returns.
+""".
 -spec probe_subscribe(binary(), atom()) -> ok.
 probe_subscribe(Name, Type) ->
     gen_server:call(?SERVER, {probe_subscribe, Name, Type}).
 
+-doc "Stop the calling process's `probe_subscribe/2` subscription to Name/Type.".
 -spec probe_unsubscribe(binary(), atom()) -> ok.
 probe_unsubscribe(Name, Type) ->
     gen_server:call(?SERVER, {probe_unsubscribe, Name, Type}).
 
-%% Call when the embedding system detects that the configured
-%% interface's address changed (e.g. a DHCP renewal) - this app does not
-%% watch for that itself. Rejoins the multicast group on the new address
-%% if it actually changed; a no-op otherwise.
+-doc """
+Call when the embedding system detects that the configured
+interface's address changed (e.g. a DHCP renewal) - this app does not
+watch for that itself. Rejoins the multicast group on the new address
+if it actually changed; a no-op otherwise.
+""".
 -spec refresh_interface() -> ok | {error, term()}.
 refresh_interface() ->
     gen_server:call(?SERVER, refresh_interface).

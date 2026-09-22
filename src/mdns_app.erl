@@ -1,9 +1,6 @@
-%%%-------------------------------------------------------------------
-%% @doc mdns public API
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(mdns_app).
+
+-moduledoc "OTP application callback module - starts the top-level supervisor.".
 
 -behaviour(application).
 

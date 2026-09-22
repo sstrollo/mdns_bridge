@@ -38,6 +38,30 @@ Project-specific guidance - read this before making changes.
 - **Never use a bare `catch Expr`** - always `try ... catch ...` (a bare
   catch swallows exits/errors indiscriminately and makes error
   provenance hard to trace).
+- **Document with `-moduledoc`/`-doc`, not `%% @doc` edoc comments.**
+  Every module gets a `-moduledoc` right after `-module(...)`, and every
+  exported function that has real usage-facing documentation gets a
+  `-doc` attribute directly above its `-spec` (or function head, if
+  there's no spec). Use a plain `-doc "One line.".` string for a
+  single-line doc; use the OTP 27+ triple-quote syntax
+  (`-doc """ ... """.`) for anything longer, or anything containing a
+  literal `"` (triple-quote needs no escaping). Quote code/identifiers
+  with single backticks (`` `foo` ``) - this is Markdown, not edoc's
+  `` `foo' `` convention. OTP behaviour callback exports
+  (`init/1`, `handle_call/3`, `start_link/0`, `child_spec/0`, ...) don't
+  need a `-doc` - they're supervision plumbing, not the module's
+  documented API surface.
+  **What goes in a `-doc`:** what the function does, its contract, and
+  anything a caller needs to know to use it correctly (valid inputs,
+  return shape, when it blocks, RFC citations for protocol behavior).
+  **What doesn't:** the history of how the function came to work this
+  way, a war story about a bug that led to the current implementation,
+  or how something was discovered during testing/debugging - that
+  belongs in the commit message, not permanent doc text a caller has
+  to read past. Implementation rationale a future maintainer needs
+  (why this order of operations, why this particular approach) is
+  still worth keeping - just as a plain `%%` comment on the
+  implementation, not inside the `-doc` string.
 - **Legible but efficient.** This app's gen_servers run indefinitely -
   avoid needless intermediate terms on genuinely hot paths (every
   incoming mDNS packet in `mdns_socket`, every classic-DNS bridge query

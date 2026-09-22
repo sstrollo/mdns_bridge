@@ -1,12 +1,12 @@
-%%%-------------------------------------------------------------------
-%% @doc Active mDNS querying: on-demand resolve/3 (blocking, callable from
-%% any process - used by the classic-DNS bridge on a cache miss) plus a
-%% periodic sweep that proactively re-queries cache entries before their
-%% TTL expires, so answers don't just silently go stale between the time
-%% someone last overheard them.
-%% @end
-%%%-------------------------------------------------------------------
 -module(mdns_query).
+
+-moduledoc """
+Active mDNS querying: on-demand `resolve/3` (blocking, callable from
+any process - used by the classic-DNS bridge on a cache miss) plus a
+periodic sweep that proactively re-queries cache entries before their
+TTL expires, so answers don't just silently go stale between the time
+someone last overheard them.
+""".
 
 -behaviour(gen_server).
 
@@ -25,16 +25,18 @@ child_spec() ->
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
-%% Resolve Name/Type, issuing an mDNS query and waiting up to TimeoutMs for
-%% an answer if it isn't already cached (see mdns_cache:await/3 - this
-%% just fires the query and blocks on that). Safe to call concurrently
-%% from many processes - each call blocks in its own gen_server:call, no
-%% shared bottleneck.
-%%
-%% A name registered via mdns:register/2,3 is always answered from
-%% mdns_registry, never from mdns_cache: we're the authority on our own
-%% published records, regardless of what else the network might be
-%% saying about that name (accidentally or otherwise).
+-doc """
+Resolve Name/Type, issuing an mDNS query and waiting up to TimeoutMs
+for an answer if it isn't already cached (see `mdns_cache:await/3` -
+this just fires the query and blocks on that). Safe to call
+concurrently from many processes - each call blocks independently, no
+shared bottleneck.
+
+A name registered via `mdns:register/2,3` is always answered from
+`mdns_registry`, never from `mdns_cache`: we're the authority on our
+own published records, regardless of what else the network might be
+saying about that name (accidentally or otherwise).
+""".
 -spec resolve(string() | binary(), atom(), timeout()) ->
     {ok, [{term(), non_neg_integer()}]} | {error, timeout}.
 resolve(Name0, Type, TimeoutMs) ->

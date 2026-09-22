@@ -1,16 +1,17 @@
-%%%-------------------------------------------------------------------
-%% @doc Resolves the configured mDNS interface (a name like "eth0", or a
-%% literal IPv4 address) to the IPv4 address to bind/join multicast on,
-%% and to that interface's netmask (used by mdns_registry to sanity-check
-%% addresses it's asked to publish).
-%% @end
-%%%-------------------------------------------------------------------
 -module(mdns_iface).
+
+-moduledoc """
+Resolves the configured mDNS interface (a name like "eth0", or a
+literal IPv4 address) to the IPv4 address to bind/join multicast on,
+and to that interface's netmask (used by `mdns_registry` to
+sanity-check addresses it's asked to publish).
+""".
 
 -export([resolve/1, resolve_with_netmask/1, same_subnet/3]).
 
 -type config() :: undefined | string() | binary() | inet:ip4_address().
 
+-doc "Resolve Config to the IPv4 address to bind/join multicast on.".
 -spec resolve(config()) -> {ok, inet:ip4_address()} | {error, term()}.
 resolve(Config) ->
     case resolve_with_netmask(Config) of
@@ -18,6 +19,12 @@ resolve(Config) ->
         {error, _} = Err -> Err
     end.
 
+-doc """
+Like `resolve/1`, but also returns the resolved interface's netmask.
+Config is an interface name, a literal IPv4 address, or `undefined`
+to auto-detect the first "up", non-loopback interface with an IPv4
+address.
+""".
 -spec resolve_with_netmask(config()) ->
     {ok, {inet:ip4_address(), inet:ip4_address()}} | {error, term()}.
 resolve_with_netmask(undefined) ->
@@ -33,9 +40,11 @@ resolve_with_netmask(Name) when is_list(Name); is_binary(Name) ->
         {error, _} -> resolve_ifname(IfName)
     end.
 
-%% Is Ip on the same subnet as (Base, Netmask)? Used to sanity-check
-%% addresses mdns_registry is asked to publish against the configured
-%% mDNS interface.
+-doc """
+Whether Ip is on the same subnet as `{Base, Netmask}` - used to
+sanity-check addresses `mdns_registry` is asked to publish against
+the configured mDNS interface.
+""".
 -spec same_subnet(inet:ip4_address(), inet:ip4_address(), inet:ip4_address()) -> boolean().
 same_subnet({A1, B1, C1, D1}, {A2, B2, C2, D2}, {M1, M2, M3, M4}) ->
     (A1 band M1) =:= (A2 band M1) andalso
