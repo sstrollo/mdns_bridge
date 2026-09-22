@@ -168,21 +168,37 @@ cache_flush_keeps_same_batch_entries() ->
 %% of various arities - all seen on a real LAN (anonymized: none of this
 %% is real device/network data). print/1 must handle all of it without
 %% crashing or silently dropping anything.
+%% Entries use the same shapes mdns_proto:extract_records/1 actually
+%% produces from real traffic (binary Name, and - via from_wire_data/2 -
+%% binary PTR/SRV/TXT data too), matching a real LAN's mix of record
+%% types and, for the multi-entry TXT case, a real device's TXT record
+%% shape (~20 key=value strings) rather than a token example.
 print_handles_every_record_shape_seen_on_a_real_lan() ->
     Entries = [
-        {"printer1._http._tcp.local", 47, <<193, 59, 0, 5, 0, 0, 128, 0, 64>>, 59, false},
-        {"_http._tcp.local", ptr, "printer1._http._tcp.local", 4125, false},
-        {"_services._dns-sd._udp.local", ptr, "_http._tcp.local", 4125, false},
-        {"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.local", a, {10, 0, 0, 50}, 3937, false},
-        {"host1.local", aaaa, {65152, 0, 0, 0, 1, 2, 3, 4}, 1394, false},
-        {"70-35-60-63\\.1 device2._sleep-proxy._udp.local", srv, {0, 0, 61264, "Device2.local"},
-            3660, false},
-        {"70-35-60-63\\.1 device2._sleep-proxy._udp.local", txt, [[]], 3660, false},
-        {"host3._device-info._tcp.local", txt, ["model=SomeModel,1@ECOLOR=111,111,111"], 1703,
-            false},
-        {"50.0.0.10.in-addr.arpa", ptr, "host4.local", 1397, false},
-        {"1.2.3.4.5.6.7.8.9.0.a.b.c.d.e.f.0.0.0.0.0.0.0.0.0.0.0.0.0.8.e.f.ip6.arpa", ptr,
-            "host1.local", 1397, false}
+        {<<"printer1._http._tcp.local">>, 47, <<193, 59, 0, 5, 0, 0, 128, 0, 64>>, 59, false},
+        {<<"_http._tcp.local">>, ptr, <<"printer1._http._tcp.local">>, 4125, false},
+        {<<"_services._dns-sd._udp.local">>, ptr, <<"_http._tcp.local">>, 4125, false},
+        {<<"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.local">>, a, {10, 0, 0, 50}, 3937, false},
+        {<<"host1.local">>, aaaa, {65152, 0, 0, 0, 1, 2, 3, 4}, 1394, false},
+        {<<"70-35-60-63\\.1 device2._sleep-proxy._udp.local">>, srv,
+            {0, 0, 61264, <<"device2.local">>}, 3660, false},
+        {<<"70-35-60-63\\.1 device2._sleep-proxy._udp.local">>, txt, [<<>>], 3660, false},
+        {<<"host3._device-info._tcp.local">>, txt, [<<"model=SomeModel,1@ECOLOR=111,111,111">>],
+            1703, false},
+        {<<"printer1._ipp._tcp.local">>, txt,
+            [
+                <<"txtvers=1">>,
+                <<"qtotal=1">>,
+                <<"ty=Example Printer">>,
+                <<"product=(Example Printer)">>,
+                <<"priority=25">>,
+                <<"Color=F">>,
+                <<"Duplex=T">>
+            ],
+            4125, false},
+        {<<"50.0.0.10.in-addr.arpa">>, ptr, <<"host4.local">>, 1397, false},
+        {<<"1.2.3.4.5.6.7.8.9.0.a.b.c.d.e.f.0.0.0.0.0.0.0.0.0.0.0.0.0.8.e.f.ip6.arpa">>, ptr,
+            <<"host1.local">>, 1397, false}
     ],
     ok = mdns_cache:insert_many(Entries),
     Path = "mdns_cache_print_test_" ++ integer_to_list(erlang:unique_integer([positive])),
@@ -192,21 +208,23 @@ print_handles_every_record_shape_seen_on_a_real_lan() ->
     {ok, Bin} = file:read_file(Path),
     ok = file:delete(Path),
     Text = binary_to_list(Bin),
-    %% Not asserting a strict line count: io:format's ~p pretty-printer
-    %% wraps a wide term (a multi-element tuple, a long binary) across
-    %% several lines, so "one line per entry" doesn't hold in general -
-    %% what matters is that every entry's data made it into the output
-    %% intact, nothing crashed, and the summary count is right.
     Needles = [
         "printer1._http._tcp.local",
-        "193,59",
-        "0,5,0,0,128,0,64",
-        "10,0,0,50",
-        "65152",
-        "61264",
-        "Device2.local",
-        "[[]]",
+        %% unrecognized type (47/NSEC) falls back to a raw ~0p dump
+        "<<193,59,0,5,0,0,128,0,64>>",
+        %% a/aaaa: a real address string via inet:ntoa/1, not a tuple
+        "10.0.0.50",
+        "fe80::1:2:3:4",
+        %% srv: labeled fields, unquoted target
+        "priority=0 weight=0 port=61264 target=device2.local",
+        "70-35-60-63\\.1 device2._sleep-proxy._udp.local",
+        %% txt: unquoted; a real (multi-entry) TXT record one string per
+        %% line rather than crammed onto the entry's own line
         "model=SomeModel,1@ECOLOR=111,111,111",
+        "  txtvers=1",
+        "  product=(Example Printer)",
+        "  Duplex=T",
+        %% ptr: just the unquoted target name
         "host4.local",
         "1.2.3.4.5.6.7.8.9.0.a.b.c.d.e.f.0.0.0.0.0.0.0.0.0.0.0.0.0.8.e.f.ip6.arpa",
         integer_to_list(length(Entries)) ++ " entries"

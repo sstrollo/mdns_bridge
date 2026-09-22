@@ -158,13 +158,15 @@ dump() ->
 print() ->
     print(standard_io).
 
-%% Prints dump/0's result to IoDevice, one line per entry, sorted by
-%% {Name, Type} for readability. Data is whatever shape that record type
-%% happens to use (a tuple for a/aaaa/srv, a binary or list of binaries
-%% for ptr/txt, a raw binary for anything this app doesn't specifically
-%% understand) - printed with ~0p either way (single line even for a
-%% deeply nested term, unlike plain ~p), so nothing here is type-specific
-%% enough to need a Type-keyed formatting table.
+%% Prints dump/0's result to IoDevice, one entry per line (a multi-entry
+%% TXT record is the one exception - see format_data/2), sorted by
+%% {Name, Type} for readability, and formatted for a human rather than
+%% an `~p` dump of whatever Erlang term each record type happens to use
+%% internally: an a/aaaa address via inet:ntoa/1, not a raw tuple; PTR's
+%% target and each TXT string via ~s, not `~p`'s <<"...">> quoting; a
+%% SRV's fields labeled. Anything this app doesn't specifically
+%% understand (a raw binary for a record type we only ever pass through)
+%% falls back to ~0p.
 %%
 %% Deliberately no fixed-width columns: io_lib's ~s/~w *truncate* (to a
 %% row of `*`s, for ~w) a value wider than its given field width rather
@@ -180,12 +182,50 @@ print(IoDevice) ->
         end,
         dump()
     ),
-    [
-        io:format(IoDevice, "~s ~0p ttl=~b age=~b ~0p\n", [Name, Type, Ttl, Age, Data])
-     || #{name := Name, type := Type, data := Data, ttl_remaining := Ttl, age := Age} <-
-            Entries
-    ],
+    [print_entry(IoDevice, Entry) || Entry <- Entries],
     io:format(IoDevice, "~b entries\n", [length(Entries)]).
+
+print_entry(IoDevice, #{name := Name, type := Type, data := Data, ttl_remaining := Ttl, age := Age}) ->
+    Header = io_lib:format("~s ~0p ttl=~b age=~b", [Name, Type, Ttl, Age]),
+    case format_data(Type, Data) of
+        {inline, Formatted} ->
+            io:format(IoDevice, "~s ~s\n", [Header, Formatted]);
+        {multiline, DataEntries} ->
+            io:format(IoDevice, "~s\n", [Header]),
+            [io:format(IoDevice, "  ~s\n", [DataEntry]) || DataEntry <- DataEntries]
+    end.
+
+%% a/aaaa: a dotted-quad or colon-hex address string, not a raw tuple -
+%% falls back to ~0p for anything inet:ntoa/1 itself doesn't recognize
+%% as a valid address rather than crashing print/1 over it.
+format_data(Type, Data) when Type =:= a; Type =:= aaaa ->
+    case inet:ntoa(Data) of
+        {error, _} -> {inline, io_lib:format("~0p", [Data])};
+        Address -> {inline, Address}
+    end;
+%% ptr: just the target name, unquoted.
+format_data(ptr, Data) when is_binary(Data) ->
+    {inline, Data};
+%% srv: labeled fields, target unquoted - the priority/weight/port order
+%% on the wire isn't obvious to read without labels the way an a/ptr
+%% record's single value is.
+format_data(srv, {Priority, Weight, Port, Target}) ->
+    {inline,
+        io_lib:format("priority=~b weight=~b port=~b target=~s", [
+            Priority, Weight, Port, Target
+        ])};
+%% txt: unquoted, and - since a real TXT record can hold a couple dozen
+%% strings (e.g. a printer's IPP capabilities) - one per (indented) line
+%% once there's more than a single entry to keep scannable, rather than
+%% cramming them all onto the entry's own line.
+format_data(txt, []) ->
+    {inline, <<>>};
+format_data(txt, [Entry]) when is_binary(Entry) ->
+    {inline, Entry};
+format_data(txt, Data) when is_list(Data) ->
+    {multiline, Data};
+format_data(_Type, Data) ->
+    {inline, io_lib:format("~0p", [Data])}.
 
 init([]) ->
     ets:new(?TAB, [set, public, named_table, {read_concurrency, true}]),

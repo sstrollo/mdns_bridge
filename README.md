@@ -90,15 +90,26 @@ Inspecting the cache
 `mdns_cache:dump/0` returns every current, unexpired entry as a list of
 maps (`#{name, type, data, ttl_remaining, age}`); `mdns_cache:print/0`
 formats that to an `io:device()` (default `standard_io`; `print/1` takes
-one explicitly) - handy from `rebar3 shell`. Columns are ragged, not
-fixed-width, on purpose - a fixed field width would silently truncate a
-long name (a reverse-DNS PTR query, a DNS-SD instance name - both common
-on a real network) rather than just misalign it:
+one explicitly) - handy from `rebar3 shell`. Formatted for a human, not
+`~p` on whatever Erlang term each record type happens to use internally
+- an address via `inet:ntoa/1`, not a raw tuple; a PTR's target and each
+TXT string unquoted; a SRV's fields labeled; a multi-entry TXT record
+(a real device's can easily run to a couple dozen strings) one string
+per line instead of crammed onto the entry's own line. Columns are
+otherwise ragged, not fixed-width, on purpose - a fixed field width
+would silently truncate a long name (a reverse-DNS PTR query, a DNS-SD
+instance name - both common on a real network) rather than just
+misalign it:
 
     1> mdns_cache:print().
-    my-printer.local a ttl=118 age=2 {192,168,1,42}
-    _http._tcp.local ptr ttl=4498 age=2 <<"my printer._http._tcp.local">>
-    2 entries
+    my-printer.local a ttl=118 age=2 192.168.1.42
+    _http._tcp.local ptr ttl=4498 age=2 my printer._http._tcp.local
+    my printer._http._tcp.local srv ttl=4498 age=2 priority=0 weight=0 port=631 target=my-printer.local
+    my printer._http._tcp.local txt ttl=4498 age=2
+      txtvers=1
+      ty=Example Printer
+      product=(Example Printer)
+    4 entries
 
 Cache inserts, removals (goodbye packets, RFC 6762 10.2 cache-flush
 evictions, natural TTL expiry, and `cache_max_entries` cap evictions) are
@@ -204,14 +215,11 @@ If you'd rather not touch global resolver state, `inet_res` also accepts
 inet_res:gethostbyname("some-device.local", inet, [{nameservers, [{{127, 0, 0, 1}, 8053}]}], 2000).
 ```
 
-This only works because of a specific, easy-to-get-wrong detail of OTP's
-resolver (`inet_res`): it moves from the `nameservers` list to the
+This only works because of a specific detail of OTP's resolver
+(`inet_res`): it moves from the `nameservers` list to the
 `alt_nameservers` list on NXDOMAIN or on an empty-but-OK (NOERROR, no
-answers) reply, but *not* on REFUSED - REFUSED is treated as a final
-answer. That's why this server never replies REFUSED for anything (an
-earlier version did, for names outside `.local`, and it quietly broke
-this exact setup): everything outside `.local` gets an empty NOERROR
-instead, which is what makes the fallback to your real resolver work.
+answers) reply (but *not* on REFUSED - REFUSED is treated as a final
+answer).
 
 Publishing names
 ----------------
