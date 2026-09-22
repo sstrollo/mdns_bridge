@@ -1,0 +1,18 @@
+%% Computes `vsn` from git at build time instead of hardcoding it in
+%% mdns_bridge.app.src: the exact tag string when HEAD is exactly a
+%% release tag, otherwise "dev-<short sha>" so a build always carries
+%% something traceable back to a commit. Falls back to "0.0.0-unknown"
+%% outside a git checkout (e.g. a source tarball with no .git) rather
+%% than failing the build over a version string.
+Vsn =
+    case string:trim(os:cmd("git describe --tags --exact-match HEAD 2>/dev/null")) of
+        "" ->
+            case string:trim(os:cmd("git rev-parse --short HEAD 2>/dev/null")) of
+                "" -> "0.0.0-unknown";
+                Sha -> "dev-" ++ Sha
+            end;
+        Tag ->
+            Tag
+    end,
+[{application, Name, Props}] = CONFIG,
+[{application, Name, lists:keystore(vsn, 1, Props, {vsn, Vsn})}].

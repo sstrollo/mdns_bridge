@@ -68,3 +68,10 @@ Pushing a tag matching that shape triggers
 second full CI matrix run) and then publishes a GitHub Release for that
 tag with auto-generated release notes. Nothing computes the next version
 number for you - decide it yourself before tagging.
+
+`src/mdns_bridge.app.src`'s `vsn` is never hand-edited: the sibling
+`mdns_bridge.app.src.script` overwrites it at every build (local or CI)
+by running `git describe --tags --exact-match HEAD` - the tag itself
+when HEAD is exactly a release tag, otherwise `dev-<short sha>`. This is
+why `release.yml`'s checkout uses `fetch-depth: 0` - the tag ref has to
+actually be present locally for that to resolve.

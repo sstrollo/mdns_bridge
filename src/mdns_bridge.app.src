@@ -1,6 +1,9 @@
+%% vsn below is a placeholder - mdns_bridge.app.src.script overwrites it
+%% at build time with the exact git tag (a release build) or
+%% "dev-<short sha>" (anything else). See that file.
 {application, mdns_bridge, [
     {description, "mDNS listener/cache and .local DNS bridge"},
-    {vsn, "0.1.0"},
+    {vsn, "0.0.0"},
     {registered, []},
     {mod, {mdns_app, []}},
     {applications, [

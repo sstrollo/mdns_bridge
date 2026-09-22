@@ -18,7 +18,13 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 (full history + tags): mdns_bridge.app.src.script
+      # runs `git describe --tags --exact-match HEAD` at compile time to
+      # stamp the app's vsn with this tag - it needs the tag ref actually
+      # present locally, which a shallow checkout doesn't guarantee.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       # Re-validate the tagged commit itself before publishing anything,
       # in case it was tagged from somewhere other than a green `main`.
