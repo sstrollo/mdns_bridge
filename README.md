@@ -64,6 +64,14 @@ Build
 
     $ rebar3 compile
 
+Docs
+----
+
+    $ rebar3 ex_doc
+
+Generates HTML API docs (from each module's `-moduledoc`/`-doc`
+attributes) into `doc/`, and opens them in a browser.
+
 Run
 ---
 

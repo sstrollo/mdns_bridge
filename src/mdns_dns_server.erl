@@ -11,8 +11,8 @@ For anything outside `.local` we deliberately reply NOERROR with an
 empty answer section rather than REFUSED. That's not just politeness:
 OTP's `inet_res` only falls back from its `nameservers` list to its
 `alt_nameservers` list on NXDOMAIN or on an empty-but-OK answer, never
-on REFUSED (see `inet_res:query_nss_result/9` and `res_query/5` in the
-kernel app). Replying REFUSED would make this server usable as a
+on REFUSED (see `inet_res`'s internal query_nss_result/9 and
+res_query/5 functions, in the kernel app). Replying REFUSED would make this server usable as a
 `.local`-only bridge but permanently break split-horizon setups that
 put it in `nameservers` and a real resolver in `alt_nameservers`.
 
