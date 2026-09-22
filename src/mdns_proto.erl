@@ -128,7 +128,7 @@ extract_watched_records(#dns_rec{anlist = An, arlist = Ar, nslist = Ns}) ->
 
 extract_records(RRs) ->
     [
-        {normalize_name(Domain), Type, from_wire_data(Type, Data), Ttl, CacheFlush}
+        {normalize_name(from_wire_bytes(Domain)), Type, from_wire_data(Type, Data), Ttl, CacheFlush}
      || #dns_rr{
             domain = Domain,
             type = Type,
@@ -153,10 +153,32 @@ to_wire_data(ptr, Data) -> to_domain(Data);
 to_wire_data(srv, {Prio, Weight, Port, Target}) -> {Prio, Weight, Port, to_domain(Target)};
 to_wire_data(_Type, Data) -> Data.
 
-from_wire_data(ptr, Data) -> normalize_name(Data);
-from_wire_data(srv, {Prio, Weight, Port, Target}) -> {Prio, Weight, Port, normalize_name(Target)};
-from_wire_data(txt, Data) when is_list(Data) -> [to_binary(S) || S <- Data];
-from_wire_data(_Type, Data) -> Data.
+from_wire_data(ptr, Data) ->
+    normalize_name(from_wire_bytes(Data));
+from_wire_data(srv, {Prio, Weight, Port, Target}) ->
+    {Prio, Weight, Port, normalize_name(from_wire_bytes(Target))};
+from_wire_data(txt, Data) when is_list(Data) -> [from_wire_bytes(S) || S <- Data];
+from_wire_data(_Type, Data) ->
+    Data.
+
+%% inet_dns:decode/2 hands a domain-name-shaped field (and each TXT
+%% string) back as a plain list of *raw wire bytes* (0-255), not a list
+%% of Unicode codepoints - confirmed empirically: encoding "o with
+%% diaeresis" (U+00F6) as UTF-8 gives 2 bytes, [195,182], and that's
+%% exactly the 2 list elements inet_dns:decode/2 hands back, not one
+%% element holding the codepoint 246. to_binary/1's list clause
+%% (unicode:characters_to_binary/1) is correct for a *caller-supplied*
+%% Erlang string - genuinely a codepoint list - but wrong for this: it
+%% would treat 195 and 182 as two separate codepoints and re-encode
+%% *those*, corrupting any multi-byte UTF-8 character already on the
+%% wire into a garbled, doubly-encoded mess (this was a real bug, not
+%% hypothetical - caught from a real LAN capture: "tillhör" arriving
+%% here as the 2 bytes RFC 6763's UTF-8 requires decoded into 4 wrong
+%% ones). list_to_binary/1 just packs each byte as-is, which is exactly
+%% what's needed - the bytes are already however-encoded (UTF-8, per
+%% RFC 6763) on the wire; this must preserve them, not reinterpret them.
+from_wire_bytes(B) when is_binary(B) -> B;
+from_wire_bytes(L) when is_list(L) -> list_to_binary(L).
 
 to_domain(Name) -> unicode:characters_to_list(Name).
 

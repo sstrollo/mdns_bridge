@@ -71,6 +71,37 @@ extract_answers_test() ->
         mdns_proto:extract_answers(Rec)
     ).
 
+%% Real bug, caught from a real LAN capture: inet_dns:decode/2 hands a
+%% domain-name-shaped field back as a list of *raw wire bytes*, not
+%% Unicode codepoints - "o with diaeresis" (U+00F6) is 2 list elements,
+%% [195,182] (its UTF-8 encoding), not one element holding 246.
+%% Treating that list as if it held codepoints (as a genuine
+%% caller-supplied Erlang string would) and UTF-8-*encoding* it again
+%% corrupts every multi-byte character: "ö" came out as 4 bytes,
+%% [195,163,194,182], not the correct 2. Round-trips real bytes through
+%% the real inet_dns:encode/decode, then extract_answers/1, rather than
+%% just unit-testing the conversion helper in isolation - this is
+%% exactly the shape a real device's announcement takes.
+round_trip_utf8_ptr_data_test() ->
+    %% "tillh" + o-with-diaeresis (correctly UTF-8-encoded: 195, 182) + "r"
+    RawLabel = "tillh" ++ [195, 182] ++ "r",
+    Rr = #dns_rr{
+        domain = "_airplay._tcp.local",
+        type = ptr,
+        class = in,
+        ttl = 120,
+        data = RawLabel ++ "._airplay._tcp.local",
+        func = true
+    },
+    Rec = #dns_rec{
+        header = #dns_header{}, qdlist = [], anlist = [Rr], nslist = [], arlist = []
+    },
+    Bin = inet_dns:encode(Rec, true),
+    {ok, Decoded} = inet_dns:decode(Bin, true),
+    [{_Name, ptr, Data, _Ttl, _CacheFlush}] = mdns_proto:extract_answers(Decoded),
+    Expected = <<"tillh", 195, 182, "r._airplay._tcp.local">>,
+    ?assertEqual(Expected, Data).
+
 dns_response_nxdomain_test() ->
     Req = request("missing.local", a),
     Resp = mdns_proto:dns_response(Req, [], a, false),
