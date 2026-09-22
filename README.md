@@ -70,7 +70,9 @@ Docs
     $ rebar3 ex_doc
 
 Generates HTML API docs (from each module's `-moduledoc`/`-doc`
-attributes) into `doc/`, and opens them in a browser.
+attributes) into `doc/` - open `doc/index.html` in a browser. Also
+published automatically to GitHub Pages on every push to `main` (see
+`.github/workflows/ci.yml`).
 
 Run
 ---

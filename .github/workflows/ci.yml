@@ -46,3 +46,42 @@ jobs:
 
       - name: Dialyzer
         run: rebar3 dialyzer
+
+  docs:
+    name: Publish docs
+    needs: test
+    # Only from main, not PRs - a fork PR's GITHUB_TOKEN can't get Pages
+    # write access anyway, and there's no reason to publish docs for a
+    # commit that hasn't landed.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          rebar3-version: "3.27"
+
+      - name: Build docs
+        run: rebar3 ex_doc
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: doc
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
