@@ -10,9 +10,9 @@ resolver, an internal forwarder, or Erlang's own `inet_db`) can resolve
 `.local` names without speaking mDNS itself.
 
 _Note: this project is implemented with the help of AI - in the
-classical open source vein it is a project that I needed for something
-else, so I actually use it and intend to keep it maintained (with or
-without the help of AI)._
+classical open-source vein it is a project that I needed for something
+else, an itch that needed a scratch, so I actually do use it and
+intend to keep it maintained (with or without the help of AI)._
 
 Features
 --------
