@@ -167,3 +167,57 @@ build_txt_data_test_() ->
             [~"a=1"], mdns_proto:build_txt_data([{~"a", ~"1"}])
         )
     ].
+
+describe_data_test_() ->
+    [
+        ?_assertEqual({inline, ~"192.168.1.1"}, describe(a, {192, 168, 1, 1})),
+        ?_assertEqual({inline, ~"fe80::1"}, describe(aaaa, {65152, 0, 0, 0, 0, 0, 0, 1})),
+        %% not a valid address for the type - falls back to a raw dump
+        %% rather than crashing print/1 over it
+        ?_assertEqual({inline, ~"not_an_address"}, describe(a, not_an_address)),
+        ?_assertEqual({inline, ~"widget.local"}, describe(ptr, ~"widget.local")),
+        ?_assertEqual(
+            {inline, ~"priority=0 weight=0 port=8080 target=widget.local"},
+            describe(srv, {0, 0, 8080, ~"widget.local"})
+        ),
+        ?_assertEqual({inline, <<>>}, describe(txt, [])),
+        ?_assertEqual({inline, ~"path=/"}, describe(txt, [~"path=/"])),
+        ?_assertEqual(
+            {multiline, [~"a=1", ~"b=2"]}, describe(txt, [~"a=1", ~"b=2"])
+        ),
+        %% a record type this app doesn't understand at all - raw dump
+        ?_assertEqual({inline, ~"<<1,2,3>>"}, describe(99, <<1, 2, 3>>))
+    ].
+
+%% Byte shapes anonymized from a real LAN's NSEC (type 47) traffic -
+%% only device/host names changed, the wire structure (compressed vs.
+%% uncompressed next-name, single- vs. multi-type bitmaps) is real.
+describe_nsec_test_() ->
+    [
+        %% compressed next-name (a 2-byte 0xC0.. pointer) + a single-type
+        %% bitmap - the common shape for a plain host's own NSEC record
+        ?_assertEqual({inline, ~"types=a"}, describe(47, <<192, 12, 0, 1, 64>>)),
+        ?_assertEqual({inline, ~"types=ptr"}, describe(47, <<192, 12, 0, 2, 0, 8>>)),
+        %% two types in one bitmap byte-range - the common shape for a
+        %% DNS-SD service instance (SRV + TXT)
+        ?_assertEqual(
+            {inline, ~"types=txt,srv"}, describe(47, <<192, 43, 0, 5, 0, 0, 128, 0, 64>>)
+        ),
+        %% uncompressed next-name (length-prefixed labels, "weird1.local")
+        %% ending in the root label, rather than a compression pointer
+        ?_assertEqual(
+            {inline, ~"types=aaaa"},
+            describe(
+                47,
+                <<6, 119, 101, 105, 114, 100, 49, 5, 108, 111, 99, 97, 108, 0, 0, 4, 0, 0, 0, 8>>
+            )
+        ),
+        %% malformed rdata - falls back to a raw dump, doesn't crash
+        ?_assertMatch({inline, _}, describe(47, <<1, 2>>))
+    ].
+
+describe(Type, Data) ->
+    case mdns_proto:describe_data(Type, Data) of
+        {inline, IoData} -> {inline, iolist_to_binary(IoData)};
+        {multiline, Entries} -> {multiline, [iolist_to_binary(E) || E <- Entries]}
+    end.

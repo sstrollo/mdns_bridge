@@ -159,14 +159,20 @@ print() ->
     print(standard_io).
 
 %% Prints dump/0's result to IoDevice, one entry per line (a multi-entry
-%% TXT record is the one exception - see format_data/2), sorted by
-%% {Name, Type} for readability, and formatted for a human rather than
-%% an `~p` dump of whatever Erlang term each record type happens to use
-%% internally: an a/aaaa address via inet:ntoa/1, not a raw tuple; PTR's
-%% target and each TXT string via ~s, not `~p`'s <<"...">> quoting; a
-%% SRV's fields labeled. Anything this app doesn't specifically
-%% understand (a raw binary for a record type we only ever pass through)
-%% falls back to ~0p.
+%% TXT record is the one exception - see mdns_proto:describe_data/2),
+%% sorted by {Name, Type} for readability, and formatted for a human
+%% rather than an `~p` dump of whatever Erlang term each record type
+%% happens to use internally - see describe_data/2's own doc for what
+%% that means per type. Sets IoDevice's encoding to unicode first: a
+%% real name/TXT string is very often non-ASCII (RFC 6763 explicitly
+%% allows UTF-8), and printing via ~ts without this can come out *worse*
+%% than plain ~s would - on a device left at Erlang's `latin1` default
+%% (which an explicitly-opened file always is, and even `standard_io`
+%% is when the locale isn't configured for UTF-8), ~ts actively replaces
+%% multi-byte characters with `?` on the way out, where plain ~s's
+%% "dumb" byte-for-byte passthrough would at least have left valid UTF-8
+%% bytes for the terminal to render correctly by luck. Best-effort -
+%% ignored if IoDevice doesn't support setopts/2.
 %%
 %% Deliberately no fixed-width columns: io_lib's ~s/~w *truncate* (to a
 %% row of `*`s, for ~w) a value wider than its given field width rather
@@ -176,6 +182,7 @@ print() ->
 %% debugging tool. Ragged columns beat truncated data.
 -spec print(io:device()) -> ok.
 print(IoDevice) ->
+    _ = io:setopts(IoDevice, [{encoding, unicode}]),
     Entries = lists:sort(
         fun(#{name := N1, type := T1}, #{name := N2, type := T2}) ->
             {N1, T1} =< {N2, T2}
@@ -186,46 +193,14 @@ print(IoDevice) ->
     io:format(IoDevice, "~b entries\n", [length(Entries)]).
 
 print_entry(IoDevice, #{name := Name, type := Type, data := Data, ttl_remaining := Ttl, age := Age}) ->
-    Header = io_lib:format("~s ~0p ttl=~b age=~b", [Name, Type, Ttl, Age]),
-    case format_data(Type, Data) of
+    Header = io_lib:format("~ts ~0p ttl=~b age=~b", [Name, Type, Ttl, Age]),
+    case mdns_proto:describe_data(Type, Data) of
         {inline, Formatted} ->
-            io:format(IoDevice, "~s ~s\n", [Header, Formatted]);
+            io:format(IoDevice, "~ts ~ts\n", [Header, Formatted]);
         {multiline, DataEntries} ->
-            io:format(IoDevice, "~s\n", [Header]),
-            [io:format(IoDevice, "  ~s\n", [DataEntry]) || DataEntry <- DataEntries]
+            io:format(IoDevice, "~ts\n", [Header]),
+            [io:format(IoDevice, "  ~ts\n", [DataEntry]) || DataEntry <- DataEntries]
     end.
-
-%% a/aaaa: a dotted-quad or colon-hex address string, not a raw tuple -
-%% falls back to ~0p for anything inet:ntoa/1 itself doesn't recognize
-%% as a valid address rather than crashing print/1 over it.
-format_data(Type, Data) when Type =:= a; Type =:= aaaa ->
-    case inet:ntoa(Data) of
-        {error, _} -> {inline, io_lib:format("~0p", [Data])};
-        Address -> {inline, Address}
-    end;
-%% ptr: just the target name, unquoted.
-format_data(ptr, Data) when is_binary(Data) ->
-    {inline, Data};
-%% srv: labeled fields, target unquoted - the priority/weight/port order
-%% on the wire isn't obvious to read without labels the way an a/ptr
-%% record's single value is.
-format_data(srv, {Priority, Weight, Port, Target}) ->
-    {inline,
-        io_lib:format("priority=~b weight=~b port=~b target=~s", [
-            Priority, Weight, Port, Target
-        ])};
-%% txt: unquoted, and - since a real TXT record can hold a couple dozen
-%% strings (e.g. a printer's IPP capabilities) - one per (indented) line
-%% once there's more than a single entry to keep scannable, rather than
-%% cramming them all onto the entry's own line.
-format_data(txt, []) ->
-    {inline, <<>>};
-format_data(txt, [Entry]) when is_binary(Entry) ->
-    {inline, Entry};
-format_data(txt, Data) when is_list(Data) ->
-    {multiline, Data};
-format_data(_Type, Data) ->
-    {inline, io_lib:format("~0p", [Data])}.
 
 init([]) ->
     ets:new(?TAB, [set, public, named_table, {read_concurrency, true}]),

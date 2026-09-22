@@ -171,15 +171,32 @@ cache_flush_keeps_same_batch_entries() ->
 %% Entries use the same shapes mdns_proto:extract_records/1 actually
 %% produces from real traffic (binary Name, and - via from_wire_data/2 -
 %% binary PTR/SRV/TXT data too), matching a real LAN's mix of record
-%% types and, for the multi-entry TXT case, a real device's TXT record
-%% shape (~20 key=value strings) rather than a token example.
+%% types: a multi-entry TXT record with a real device's shape (~20
+%% key=value strings, not a token example), real NSEC (type 47) byte
+%% shapes (both a compressed and an uncompressed "next name" encoding -
+%% see mdns_proto's describe_nsec/1), and a name containing genuine
+%% multi-byte UTF-8 (RFC 6763 explicitly allows UTF-8 in these strings,
+%% and it's common in practice - device/service names with accents,
+%% emoji, etc.).
 print_handles_every_record_shape_seen_on_a_real_lan() ->
+    %% "café.local" as explicit bytes, not a literal in this file's own
+    %% source encoding - keeps the test unambiguous about which bytes
+    %% are actually being exercised.
+    CafeName = <<"caf", 195, 169, ".local">>,
     Entries = [
+        %% NSEC, compressed next-name pointer, asserting "srv, txt exist"
         {<<"printer1._http._tcp.local">>, 47, <<193, 59, 0, 5, 0, 0, 128, 0, 64>>, 59, false},
+        %% NSEC, uncompressed next-name ("anon-device.local"), asserting
+        %% "a exists"
+        {<<"anon-device.local">>, 47,
+            <<11, 97, 110, 111, 110, 45, 100, 101, 118, 105, 99, 101, 5, 108, 111, 99, 97, 108, 0,
+                0, 1, 64>>,
+            59, false},
         {<<"_http._tcp.local">>, ptr, <<"printer1._http._tcp.local">>, 4125, false},
         {<<"_services._dns-sd._udp.local">>, ptr, <<"_http._tcp.local">>, 4125, false},
         {<<"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.local">>, a, {10, 0, 0, 50}, 3937, false},
         {<<"host1.local">>, aaaa, {65152, 0, 0, 0, 1, 2, 3, 4}, 1394, false},
+        {CafeName, a, {10, 0, 0, 77}, 120, false},
         {<<"70-35-60-63\\.1 device2._sleep-proxy._udp.local">>, srv,
             {0, 0, 61264, <<"device2.local">>}, 3660, false},
         {<<"70-35-60-63\\.1 device2._sleep-proxy._udp.local">>, txt, [<<>>], 3660, false},
@@ -210,11 +227,21 @@ print_handles_every_record_shape_seen_on_a_real_lan() ->
     Text = binary_to_list(Bin),
     Needles = [
         "printer1._http._tcp.local",
-        %% unrecognized type (47/NSEC) falls back to a raw ~0p dump
-        "<<193,59,0,5,0,0,128,0,64>>",
+        %% nsec: decoded, not a raw dump. "types=a\n" (not just
+        %% "types=a") distinguishes this from a types=aaaa row nearby -
+        %% "types=a" alone would also match as its prefix. ttl isn't
+        %% checked exactly - it can tick down by 1 between insert and
+        %% print depending on timing.
+        "types=txt,srv",
+        "anon-device.local 47 ttl=",
+        "types=a\n",
         %% a/aaaa: a real address string via inet:ntoa/1, not a tuple
         "10.0.0.50",
         "fe80::1:2:3:4",
+        %% a genuinely multi-byte UTF-8 name renders as the real
+        %% characters, not mangled - checked as explicit bytes (see
+        %% CafeName above), not a literal in this file's own encoding
+        binary_to_list(<<CafeName/binary, " a ttl=">>),
         %% srv: labeled fields, unquoted target
         "priority=0 weight=0 port=61264 target=device2.local",
         "70-35-60-63\\.1 device2._sleep-proxy._udp.local",

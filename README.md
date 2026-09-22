@@ -90,17 +90,21 @@ Inspecting the cache
 `mdns_cache:dump/0` returns every current, unexpired entry as a list
 of maps (`#{name, type, data, ttl_remaining, age}`), while
 `mdns_cache:print/0` formats that to an `io:device()` (default
-`standard_io`; `print/1` takes one explicitly) in a readable format.
+`standard_io`; `print/1` takes one explicitly) in a readable format,
+including decoding an NSEC (type 47) record's type bitmap - common in
+real mDNS traffic as a "these are all the record types that exist here"
+assertion - into a plain list of type names.
 
     1> mdns_cache:print().
     my-printer.local a ttl=118 age=2 192.168.1.42
+    my-printer.local 47 ttl=118 age=2 types=a
     _http._tcp.local ptr ttl=4498 age=2 my printer._http._tcp.local
     my printer._http._tcp.local srv ttl=4498 age=2 priority=0 weight=0 port=631 target=my-printer.local
     my printer._http._tcp.local txt ttl=4498 age=2
       txtvers=1
       ty=Example Printer
       product=(Example Printer)
-    4 entries
+    5 entries
 
 Cache inserts, removals (goodbye packets, RFC 6762 10.2 cache-flush
 evictions, natural TTL expiry, and `cache_max_entries` cap evictions)

@@ -32,7 +32,8 @@
     escape_label/1,
     service_type_name/1,
     service_instance_name/2,
-    build_txt_data/1
+    build_txt_data/1,
+    describe_data/2
 ]).
 
 -define(CLASS_IN, in).
@@ -207,6 +208,153 @@ txt_entry(Plain) -> to_binary(Plain).
 
 to_binary(S) when is_binary(S) -> S;
 to_binary(S) when is_list(S) -> unicode:characters_to_binary(S).
+
+%% Describes Data for a human, keyed off Type - used by mdns_cache:print/1
+%% (kept here, not there: interpreting what a record type's data means on
+%% the wire is exactly this module's job everywhere else too). Returns
+%% either {inline, IoData} for one line, or {multiline, [IoData]} for a
+%% TXT record with more than one string - see the txt clause. Anything
+%% this app doesn't have a specific reading for - an unrecognized type,
+%% or data that doesn't match a known type's expected shape - falls back
+%% to a plain ~0p dump rather than guessing wrong or crashing.
+-spec describe_data(atom() | non_neg_integer(), term()) ->
+    {inline, iodata()} | {multiline, [iodata()]}.
+%% a/aaaa: a dotted-quad or colon-hex address string, not a raw tuple.
+describe_data(Type, Data) when Type =:= a; Type =:= aaaa ->
+    case inet:ntoa(Data) of
+        {error, _} -> {inline, io_lib:format("~0p", [Data])};
+        Address -> {inline, Address}
+    end;
+%% ptr: just the target name, unquoted.
+describe_data(ptr, Data) when is_binary(Data) ->
+    {inline, Data};
+%% srv: labeled fields, target unquoted - the priority/weight/port order
+%% on the wire isn't obvious to read without labels the way an a/ptr
+%% record's single value is.
+describe_data(srv, {Priority, Weight, Port, Target}) ->
+    {inline,
+        io_lib:format("priority=~b weight=~b port=~b target=~ts", [
+            Priority, Weight, Port, Target
+        ])};
+%% txt: unquoted, and - since a real TXT record can hold a couple dozen
+%% strings (e.g. a printer's IPP capabilities) - one per (indented) line
+%% once there's more than a single entry to keep scannable, rather than
+%% cramming them all onto the entry's own line.
+describe_data(txt, []) ->
+    {inline, <<>>};
+describe_data(txt, [Entry]) when is_binary(Entry) ->
+    {inline, Entry};
+describe_data(txt, Data) when is_list(Data) ->
+    {multiline, Data};
+%% nsec (47): see describe_nsec/1.
+describe_data(47, Data) when is_binary(Data) ->
+    describe_nsec(Data);
+describe_data(_Type, Data) ->
+    {inline, io_lib:format("~0p", [Data])}.
+
+%% RFC 4034/3845: NSEC's data is a "next domain name" (frequently
+%% compressed - a 2-byte pointer this app can't resolve, since inet_dns
+%% only ever hands us this one record's own rdata, not the whole packet
+%% it came from - see skip_dns_name/1) followed by one or more
+%% {window, bitmap} blocks marking which record types exist for this
+%% name. This shows up constantly in real mDNS traffic as the common
+%% idiom for asserting "these are ALL the types I have here" (e.g.
+%% "srv,txt" for a service instance, "a,aaaa" for a plain dual-stack
+%% host) - a negative-answer optimization, not real DNSSEC validation.
+%% The name itself isn't shown: not generically resolvable when
+%% compressed, and not useful to a human either - just the types, which
+%% are self-contained regardless of how the name portion was encoded.
+describe_nsec(Data) ->
+    case skip_dns_name(Data) of
+        {ok, Rest} ->
+            case decode_nsec_windows(Rest, []) of
+                {ok, Types} ->
+                    {inline, [
+                        <<"types=">>, lists:join(",", [type_name(T) || T <- Types])
+                    ]};
+                error ->
+                    {inline, io_lib:format("~0p", [Data])}
+            end;
+        error ->
+            {inline, io_lib:format("~0p", [Data])}
+    end.
+
+%% Walks an RFC 1035 name - a sequence of length-prefixed labels (1-63
+%% bytes each) ending in either a zero-length root label or a 2-byte
+%% compression pointer (the top 2 bits of the next byte set) - far
+%% enough to find where it ends, without resolving what a pointer
+%% actually points to (impossible from a single record's rdata alone).
+skip_dns_name(<<Len, _Label:Len/binary, Rest/binary>>) when Len > 0, Len =< 63 ->
+    skip_dns_name(Rest);
+skip_dns_name(<<0, Rest/binary>>) ->
+    {ok, Rest};
+skip_dns_name(<<Top:2, _:14, Rest/binary>>) when Top =:= 2#11 ->
+    {ok, Rest};
+skip_dns_name(_Other) ->
+    error.
+
+decode_nsec_windows(<<>>, Acc) ->
+    {ok, lists:usort(lists:append(lists:reverse(Acc)))};
+decode_nsec_windows(<<Window, BitmapLen, Bitmap:BitmapLen/binary, Rest/binary>>, Acc) when
+    BitmapLen >= 1, BitmapLen =< 32
+->
+    decode_nsec_windows(Rest, [bitmap_types(Window, Bitmap) | Acc]);
+decode_nsec_windows(_Other, _Acc) ->
+    error.
+
+%% Each window covers 256 type numbers (Window*256 .. Window*256+255);
+%% within the bitmap, bit 0 of byte 0 is type Window*256+0, counting
+%% down from the most significant bit of each byte (RFC 4034 4.1.2).
+bitmap_types(Window, Bitmap) ->
+    [
+        Window * 256 + ByteIndex * 8 + BitIndex
+     || {ByteIndex, Byte} <- lists:enumerate(0, binary_to_list(Bitmap)),
+        BitIndex <- lists:seq(0, 7),
+        (Byte bsr (7 - BitIndex)) band 1 =:= 1
+    ].
+
+%% Common DNS RR type numbers, for NSEC's type bitmap - falls back to
+%% the bare number for anything not worth naming here.
+type_name(1) -> "a";
+type_name(2) -> "ns";
+type_name(5) -> "cname";
+type_name(6) -> "soa";
+type_name(12) -> "ptr";
+type_name(13) -> "hinfo";
+type_name(15) -> "mx";
+type_name(16) -> "txt";
+type_name(17) -> "rp";
+type_name(24) -> "sig";
+type_name(25) -> "key";
+type_name(28) -> "aaaa";
+type_name(29) -> "loc";
+type_name(33) -> "srv";
+type_name(35) -> "naptr";
+type_name(36) -> "kx";
+type_name(37) -> "cert";
+type_name(39) -> "dname";
+type_name(41) -> "opt";
+type_name(43) -> "ds";
+type_name(44) -> "sshfp";
+type_name(45) -> "ipseckey";
+type_name(46) -> "rrsig";
+type_name(47) -> "nsec";
+type_name(48) -> "dnskey";
+type_name(50) -> "nsec3";
+type_name(51) -> "nsec3param";
+type_name(52) -> "tlsa";
+type_name(59) -> "cds";
+type_name(60) -> "cdnskey";
+type_name(61) -> "openpgpkey";
+type_name(64) -> "svcb";
+type_name(65) -> "https";
+type_name(99) -> "spf";
+type_name(249) -> "tkey";
+type_name(250) -> "tsig";
+type_name(255) -> "any";
+type_name(256) -> "uri";
+type_name(257) -> "caa";
+type_name(Other) -> integer_to_list(Other).
 
 %% Build a classic unicast-DNS response for the bridge server.
 %% Answers :: [{Data, Ttl}] for the queried Name/Type. Domain comes
