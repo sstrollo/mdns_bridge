@@ -47,7 +47,10 @@ service_test_() ->
             fun rejects_bad_service_type/0,
             fun rejects_bad_port/0,
             fun rejects_non_local_target_host/0,
-            fun rejects_validate_option_for_services/0
+            fun rejects_validate_option_for_services/0,
+            fun reregistering_an_instance_with_new_txt_replaces_the_old_txt/0,
+            fun reregistering_an_identical_instance_does_not_leak_the_meta_ptr/0,
+            fun takeover_of_the_last_instance_of_a_type_keeps_the_meta_ptr/0
         ]
     end}.
 
@@ -188,6 +191,61 @@ rejects_validate_option_for_services() ->
             "X", "_http._tcp", 80, [], service_local_target(9), #{validate => false}
         )
     ).
+
+%% Updating a service's TXT record by registering the same instance again
+%% is the normal way to change it. The previous registration shares the
+%% SRV and PTR keys (taken over) but not the TXT key - that old TXT row
+%% must go with the rest of the old registration, not linger on as an
+%% orphan nobody can unregister (and the old owner's meta-PTR count
+%% must be released, or the meta-PTR would outlive every registration).
+reregistering_an_instance_with_new_txt_replaces_the_old_txt() ->
+    Opts = #{probe => false},
+    Target = service_local_target(20),
+    {ok, Ref1, Name} = mdns_registry:register_service(
+        "Retxt", "_retxt._tcp", 80, [{"v", "1"}], Target, Opts
+    ),
+    {ok, Ref2, Name} = mdns_registry:register_service(
+        "Retxt", "_retxt._tcp", 80, [{"v", "2"}], Target, Opts
+    ),
+    ?assertMatch([{[~"v=2"], _}], mdns_registry:answers_for(Name, txt)),
+    ?assertMatch([{{0, 0, 80, _}, _}], mdns_registry:answers_for(Name, srv)),
+    %% The taken-over registration's ref is gone: unregistering it is a
+    %% no-op that must not disturb the new one.
+    ok = mdns_registry:unregister(Ref1),
+    ?assertMatch([{[~"v=2"], _}], mdns_registry:answers_for(Name, txt)),
+    ?assertMatch([{_, _}], mdns_registry:answers_for(~"_services._dns-sd._udp.local", ptr)),
+    ok = mdns_registry:unregister(Ref2),
+    ?assertEqual([], mdns_registry:answers_for(Name, txt)),
+    ?assertEqual([], mdns_registry:answers_for(Name, srv)),
+    ?assertEqual([], mdns_registry:answers_for(~"_retxt._tcp.local", ptr)),
+    ?assertEqual([], mdns_registry:answers_for(~"_services._dns-sd._udp.local", ptr)).
+
+reregistering_an_identical_instance_does_not_leak_the_meta_ptr() ->
+    Opts = #{probe => false},
+    Target = service_local_target(21),
+    {ok, Ref1, Name} = mdns_registry:register_service("Same", "_same._tcp", 80, [], Target, Opts),
+    {ok, Ref2, Name} = mdns_registry:register_service("Same", "_same._tcp", 80, [], Target, Opts),
+    ok = mdns_registry:unregister(Ref1),
+    ok = mdns_registry:unregister(Ref2),
+    ?assertEqual([], mdns_registry:answers_for(~"_services._dns-sd._udp.local", ptr)),
+    ?assertEqual(#{}, meta_ptr_refs_in_state()).
+
+%% The takeover must not dip the type's count to zero in between (which
+%% would goodbye the meta-PTR and immediately re-announce it).
+takeover_of_the_last_instance_of_a_type_keeps_the_meta_ptr() ->
+    Opts = #{probe => false},
+    Target = service_local_target(22),
+    {ok, _Ref1, Name} = mdns_registry:register_service("Only", "_only._tcp", 80, [], Target, Opts),
+    {ok, Ref2, Name} = mdns_registry:register_service("Only", "_only._tcp", 81, [], Target, Opts),
+    ?assertEqual(#{~"_only._tcp.local" => 1}, meta_ptr_refs_in_state()),
+    ?assertMatch([{{0, 0, 81, _}, _}], mdns_registry:answers_for(Name, srv)),
+    ok = mdns_registry:unregister(Ref2),
+    ?assertEqual(#{}, meta_ptr_refs_in_state()).
+
+%% #state.meta_ptr_refs, read positionally - sys:get_state/1 is the
+%% standard debug/testing escape hatch (same technique as mdns_cache_tests).
+meta_ptr_refs_in_state() ->
+    element(6, sys:get_state(mdns_registry)).
 
 start() ->
     {ok, Pid} = mdns_registry:start_link(),

@@ -602,26 +602,36 @@ split_service_type(ServiceType) when is_list(ServiceType) ->
 split_service_type(_) ->
     error.
 
-do_register(Name, Ip, Opts, FromPid, State) ->
+do_register(Name, Ip, Opts, FromPid, State0) ->
     Key = {Name, a, Ip},
-    Monitors0 = demonitor_previous_owner(Key, State#state.monitors),
+    State = take_over(Key, [Key], State0),
     Ref = erlang:monitor(process, FromPid),
     Ttl = application:get_env(mdns_bridge, publish_ttl, ?DEFAULT_TTL),
     OnConflict = maps:get(on_conflict, Opts, error),
     ets:insert(?TAB, {Key, #{ref => Ref, pid => FromPid, ttl => Ttl, on_conflict => OnConflict}}),
     mdns_socket:announce(Name, a, [{Ip, Ttl}]),
     erlang:send_after(?REANNOUNCE_FOLLOWUP_MS, self(), {reannounce_one, Key}),
-    {Ref, State#state{monitors = Monitors0#{Ref => {host, Key, FromPid}}}}.
+    {Ref, State#state{monitors = (State#state.monitors)#{Ref => {host, Key, FromPid}}}}.
 
-do_register_service(InstanceFullName, ServiceTypeName, Port, Target, TxtData, Opts, FromPid, State) ->
+do_register_service(
+    InstanceFullName, ServiceTypeName, Port, Target, TxtData, Opts, FromPid, State0
+) ->
     Ttl = application:get_env(mdns_bridge, service_ttl, ?DEFAULT_SERVICE_TTL),
     SrvKey = {InstanceFullName, srv, {0, 0, Port, Target}},
     TxtKey = {InstanceFullName, txt, TxtData},
     PtrKey = {ServiceTypeName, ptr, InstanceFullName},
+    Keys = [SrvKey, TxtKey, PtrKey],
     OnConflict = maps:get(on_conflict, Opts, error),
-    Monitors0 = demonitor_previous_owner(SrvKey, State#state.monitors),
-    Monitors1 = demonitor_previous_owner(TxtKey, Monitors0),
-    Monitors2 = demonitor_previous_owner(PtrKey, Monitors1),
+    %% Count this registration towards the meta-PTR *before* taking over
+    %% any previous one, so a takeover of the last registration of this
+    %% type never dips the count to zero in between - which would goodbye
+    %% the meta-PTR only to re-announce it a moment later.
+    {MetaRefs, ShouldAnnounceMeta} = bump_meta_ptr(ServiceTypeName, State0#state.meta_ptr_refs),
+    State1 = lists:foldl(
+        fun(Key, Acc) -> take_over(Key, Keys, Acc) end,
+        State0#state{meta_ptr_refs = MetaRefs},
+        Keys
+    ),
     Ref = erlang:monitor(process, FromPid),
     RowValue = #{ref => Ref, pid => FromPid, ttl => Ttl, on_conflict => OnConflict},
     ets:insert(?TAB, [{SrvKey, RowValue}, {TxtKey, RowValue}, {PtrKey, RowValue}]),
@@ -631,14 +641,13 @@ do_register_service(InstanceFullName, ServiceTypeName, Port, Target, TxtData, Op
     erlang:send_after(?REANNOUNCE_FOLLOWUP_MS, self(), {reannounce_one, SrvKey}),
     erlang:send_after(?REANNOUNCE_FOLLOWUP_MS, self(), {reannounce_one, TxtKey}),
     erlang:send_after(?REANNOUNCE_FOLLOWUP_MS, self(), {reannounce_one, PtrKey}),
-    {MetaRefs, ShouldAnnounceMeta} = bump_meta_ptr(ServiceTypeName, State#state.meta_ptr_refs),
     ShouldAnnounceMeta andalso
         begin
             ets:insert(?TAB, {{?META_SERVICE_NAME, ptr, ServiceTypeName}, #{ttl => Ttl}}),
             mdns_socket:announce(?META_SERVICE_NAME, ptr, [{ServiceTypeName, Ttl}])
         end,
-    NewMonitors = Monitors2#{Ref => {service, [SrvKey, TxtKey, PtrKey], ServiceTypeName, FromPid}},
-    {Ref, State#state{monitors = NewMonitors, meta_ptr_refs = MetaRefs}}.
+    NewMonitors = (State1#state.monitors)#{Ref => {service, Keys, ServiceTypeName, FromPid}},
+    {Ref, State1#state{monitors = NewMonitors}}.
 
 bump_meta_ptr(ServiceTypeName, Refs) ->
     Count = maps:get(ServiceTypeName, Refs, 0),
@@ -650,13 +659,18 @@ release_meta_ptr(ServiceTypeName, Refs) ->
         Count -> {Refs#{ServiceTypeName => Count - 1}, false}
     end.
 
-demonitor_previous_owner(Key, Monitors) ->
+%% A new registration is about to claim Key. If some earlier registration
+%% currently owns it, that whole registration is withdrawn first - every
+%% row it has (not just Key: a service being re-registered with a new
+%% TXT must not leave its old TXT row behind, owned by a ref nobody
+%% monitors anymore), its monitor, and its meta-PTR contribution. Rows
+%% in KeepKeys are the ones the new registration re-inserts right after,
+%% so they're removed silently: a goodbye for a record that's about to
+%% be re-announced would only make peers' caches flap.
+take_over(Key, KeepKeys, State) ->
     case ets:lookup(?TAB, Key) of
-        [{Key, #{ref := OldRef}}] ->
-            erlang:demonitor(OldRef, [flush]),
-            maps:remove(OldRef, Monitors);
-        [] ->
-            Monitors
+        [{Key, #{ref := OldRef}}] -> do_withdraw(OldRef, State, false, KeepKeys);
+        [] -> State
     end.
 
 %% Withdraws whatever Ref refers to (host or service) - used for an
@@ -664,26 +678,28 @@ demonitor_previous_owner(Key, Monitors) ->
 %% either asked for this, or is already dead. Ongoing conflict defense
 %% giving up uses withdraw_due_to_conflict/2 instead, which does notify.
 withdraw(Ref, State) ->
-    do_withdraw(Ref, State, false).
+    do_withdraw(Ref, State, false, []).
 
 withdraw_due_to_conflict(Ref, State) ->
-    do_withdraw(Ref, State, true).
+    do_withdraw(Ref, State, true, []).
 
-do_withdraw(Ref, State, Notify) ->
+do_withdraw(Ref, State, Notify, KeepKeys) ->
     case maps:take(Ref, State#state.monitors) of
         {Registration, Monitors} ->
             erlang:demonitor(Ref, [flush]),
-            withdraw_registration(Ref, Registration, Notify, State#state{monitors = Monitors});
+            withdraw_registration(
+                Ref, Registration, Notify, KeepKeys, State#state{monitors = Monitors}
+            );
         error ->
             State
     end.
 
-withdraw_registration(Ref, {host, {Name, _Type, _Data} = Key, Pid}, Notify, State) ->
-    maybe_delete_and_goodbye(Key, Ref),
+withdraw_registration(Ref, {host, {Name, _Type, _Data} = Key, Pid}, Notify, KeepKeys, State) ->
+    maybe_delete_and_goodbye(Key, Ref, KeepKeys),
     Notify andalso (Pid ! {mdns_bridge_conflict, Ref, Name}),
     State;
-withdraw_registration(Ref, {service, Keys, ServiceType, Pid}, Notify, State) ->
-    [maybe_delete_and_goodbye(Key, Ref) || Key <- Keys],
+withdraw_registration(Ref, {service, Keys, ServiceType, Pid}, Notify, KeepKeys, State) ->
+    [maybe_delete_and_goodbye(Key, Ref, KeepKeys) || Key <- Keys],
     [{InstanceName, _, _} | _] = Keys,
     Notify andalso (Pid ! {mdns_bridge_conflict, Ref, InstanceName}),
     {NewMetaRefs, ShouldGoodbye} = release_meta_ptr(ServiceType, State#state.meta_ptr_refs),
@@ -695,14 +711,17 @@ withdraw_registration(Ref, {service, Keys, ServiceType, Pid}, Notify, State) ->
     State#state{meta_ptr_refs = NewMetaRefs}.
 
 %% Only remove/goodbye if this Ref is still the current owner of Key - a
-%% newer registration may have taken it over since (see
-%% demonitor_previous_owner/2), in which case this Ref withdrawing must
-%% not affect it.
-maybe_delete_and_goodbye({Name, Type, Data} = Key, Ref) ->
+%% newer registration may have taken it over since (see take_over/3), in
+%% which case this Ref withdrawing must not affect it. A key in KeepKeys
+%% is removed without a goodbye (see take_over/3).
+maybe_delete_and_goodbye({Name, Type, Data} = Key, Ref, KeepKeys) ->
     case ets:lookup(?TAB, Key) of
         [{Key, #{ref := Ref}}] ->
             ets:delete(?TAB, Key),
-            mdns_socket:announce(Name, Type, [{Data, 0}]);
+            case lists:member(Key, KeepKeys) of
+                true -> ok;
+                false -> mdns_socket:announce(Name, Type, [{Data, 0}])
+            end;
         _ ->
             ok
     end.
