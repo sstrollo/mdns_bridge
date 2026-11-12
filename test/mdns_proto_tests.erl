@@ -306,3 +306,18 @@ type_name_test_() ->
         %% own name, not a crash
         ?_assertEqual(~"made_up_type", mdns_proto:type_name(made_up_type))
     ].
+
+%% Only the first question is resolved by the bridge, so only it may be
+%% echoed and answered - pairing the answers with a second question would
+%% hand out an authoritative record for a name never looked up.
+dns_response_multi_question_test() ->
+    Req = #dns_rec{
+        header = #dns_header{id = 7, rd = true},
+        qdlist = [
+            #dns_query{domain = "foo.local", type = a, class = in},
+            #dns_query{domain = "bar.example.com", type = a, class = in}
+        ]
+    },
+    Resp = mdns_proto:dns_response(Req, [{{10, 0, 0, 1}, 30}], a, true),
+    ?assertMatch([#dns_query{domain = "foo.local"}], Resp#dns_rec.qdlist),
+    ?assertMatch([#dns_rr{domain = "foo.local", data = {10, 0, 0, 1}}], Resp#dns_rec.anlist).

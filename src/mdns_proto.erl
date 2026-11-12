@@ -423,7 +423,10 @@ type_name(Other) when is_integer(Other) -> integer_to_binary(Other).
 
 -doc """
 Build a classic unicast-DNS response for the bridge server, answering
-the query in Req with `Answers :: [{Data, Ttl}]` for the given Type.
+the first question in Req with `Answers :: [{Data, Ttl}]` for the given
+Type. Only that question is echoed and answered: Answers were resolved
+for it alone, so attaching them to any further question would hand out
+records for a name that was never looked up.
 Found controls the response code: NXDOMAIN when nothing was found and
 Answers is empty, NOERROR otherwise (including a query this app has no
 opinion on, answered with an empty answer section).
@@ -431,6 +434,7 @@ opinion on, answered with an empty answer section).
 -spec dns_response(#dns_rec{}, [{term(), non_neg_integer()}], atom(), boolean()) ->
     #dns_rec{}.
 dns_response(#dns_rec{header = ReqHeader, qdlist = Qd}, Answers, Type, Found) ->
+    Question = lists:sublist(Qd, 1),
     Rcode =
         case {Found, Answers} of
             {true, _} -> 0;
@@ -453,6 +457,6 @@ dns_response(#dns_rec{header = ReqHeader, qdlist = Qd}, Answers, Type, Found) ->
             ttl = Ttl,
             data = to_wire_data(Type, Data)
         }
-     || #dns_query{domain = Domain} <- Qd, {Data, Ttl} <- Answers
+     || #dns_query{domain = Domain} <- Question, {Data, Ttl} <- Answers
     ],
-    #dns_rec{header = RespHeader, qdlist = Qd, anlist = AnList, nslist = [], arlist = []}.
+    #dns_rec{header = RespHeader, qdlist = Question, anlist = AnList, nslist = [], arlist = []}.
