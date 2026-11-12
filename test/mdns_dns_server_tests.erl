@@ -21,6 +21,30 @@ unsupported_type_local_query_is_empty_noerror_test() ->
     ?assertEqual(0, (Resp#dns_rec.header)#dns_header.rcode),
     ?assertEqual([], Resp#dns_rec.anlist).
 
+%% A packet with QR set is someone's response, not a query - answering it
+%% would make this port usable as a reflector.
+response_packets_are_ignored_test() ->
+    #dns_rec{header = H} = Req = request("widget.local", a),
+    ?assertEqual(
+        ignore, mdns_dns_server:response_for(Req#dns_rec{header = H#dns_header{qr = true}})
+    ).
+
+%% Opcode 5 (UPDATE) - anything but a standard query gets NOTIMP, with
+%% the question echoed and nothing else.
+non_query_opcode_gets_notimp_test() ->
+    #dns_rec{header = H} = Req = request("widget.local", a),
+    Resp = mdns_dns_server:response_for(Req#dns_rec{header = H#dns_header{opcode = 5}}),
+    ?assertEqual(4, (Resp#dns_rec.header)#dns_header.rcode),
+    ?assertEqual(1, (Resp#dns_rec.header)#dns_header.qr),
+    ?assertEqual(Req#dns_rec.qdlist, Resp#dns_rec.qdlist),
+    ?assertEqual([], Resp#dns_rec.anlist),
+    %% ...and it survives the real encoder.
+    ?assertMatch({ok, _}, inet_dns:decode(inet_dns:encode(Resp, false), false)).
+
+empty_question_section_is_ignored_test() ->
+    Req = request("widget.local", a),
+    ?assertEqual(ignore, mdns_dns_server:response_for(Req#dns_rec{qdlist = []})).
+
 request(Name, Type) ->
     #dns_rec{
         header = #dns_header{id = 7, rd = true},

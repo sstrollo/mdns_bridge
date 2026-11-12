@@ -33,6 +33,7 @@ back to this app's binary form.
     extract_answers/1,
     extract_watched_records/1,
     dns_response/4,
+    dns_error_response/2,
     escape_label/1,
     service_type_name/1,
     service_instance_name/2,
@@ -583,3 +584,15 @@ dns_response(#dns_rec{header = ReqHeader, qdlist = Qd}, Answers, Type, Found) ->
      || #dns_query{domain = Domain} <- Question, {Data, Ttl} <- Answers
     ],
     #dns_rec{header = RespHeader, qdlist = Question, anlist = AnList, nslist = [], arlist = []}.
+
+-doc """
+A classic-DNS reply to Req carrying only a response code and the first
+question (if any), for a request this bridge won't act on: `notimp`
+(NOTIMP, 4) for an opcode other than a standard query.
+""".
+-spec dns_error_response(#dns_rec{}, notimp) -> #dns_rec{}.
+dns_error_response(#dns_rec{header = ReqHeader, qdlist = Qd}, notimp) ->
+    RespHeader = ReqHeader#dns_header{qr = 1, aa = 0, ra = 0, rcode = 4},
+    #dns_rec{
+        header = RespHeader, qdlist = lists:sublist(Qd, 1), anlist = [], nslist = [], arlist = []
+    }.

@@ -33,7 +33,7 @@ the process table beyond that budget.
 
 -export([child_spec/0, start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
--export([build_response/2, should_accept/2]).
+-export([response_for/1, build_response/2, should_accept/2]).
 
 -define(SERVER, ?MODULE).
 -define(DEFAULT_PORT, 8053).
@@ -68,7 +68,10 @@ init([]) ->
     RateLimit = application:get_env(
         mdns_bridge, dns_rate_limit_per_second, ?DEFAULT_RATE_LIMIT_PER_SECOND
     ),
-    Opts = [binary, {active, ?ACTIVE_N}, {reuseaddr, true}, {ip, BindIp}],
+    %% No reuseaddr: UDP has no TIME_WAIT to work around, and on Linux
+    %% SO_REUSEADDR would let any other local process bind the same
+    %% port and take the bridge's queries away from it.
+    Opts = [binary, {active, ?ACTIVE_N}, {ip, BindIp}],
     case gen_udp:open(Port, Opts) of
         {ok, Socket} ->
             logger:info("mdns_dns_server: listening on ~0p:~b", [BindIp, Port]),
@@ -118,14 +121,33 @@ schedule_rate_reset() ->
 
 handle_query(Socket, SrcIp, SrcPort, Packet) ->
     case inet_dns:decode(Packet, false) of
-        {ok, #dns_rec{qdlist = [Q | _]} = Req} ->
-            Response = build_response(Req, Q),
-            reply(Socket, SrcIp, SrcPort, Response);
-        {ok, #dns_rec{qdlist = []}} ->
-            ok;
+        {ok, Req} ->
+            case response_for(Req) of
+                ignore -> ok;
+                Response -> reply(Socket, SrcIp, SrcPort, Response)
+            end;
         {error, _Reason} ->
             ok
     end.
+
+-doc """
+The response to send for a decoded request, or `ignore`. A packet
+that is itself a response (QR set) gets nothing - replying to one
+would make this port a reflector that two servers could be pointed at
+each other through; an opcode other than a standard query gets NOTIMP;
+a request without a question gets nothing.
+""".
+-spec response_for(#dns_rec{}) -> #dns_rec{} | ignore.
+response_for(#dns_rec{header = #dns_header{qr = true}}) ->
+    ignore;
+response_for(#dns_rec{header = #dns_header{opcode = Opcode}} = Req) when
+    Opcode =/= 'query', Opcode =/= 0
+->
+    mdns_proto:dns_error_response(Req, notimp);
+response_for(#dns_rec{qdlist = [Q | _]} = Req) ->
+    build_response(Req, Q);
+response_for(#dns_rec{qdlist = []}) ->
+    ignore.
 
 -doc "Build the DNS response for query Q of request Req.".
 build_response(Req, #dns_query{domain = Domain, type = Type}) ->
