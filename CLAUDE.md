@@ -14,6 +14,9 @@ Project-specific guidance - read this before making changes.
   exception and why.
 - **Avoid ETS as long as possible.** See "ETS usage" below for the bar
   and the precedent of removing it where it didn't earn its keep.
+- **American spelling in prose** - "behavior", not "behaviour" - in
+  docs, comments, commit messages and release notes. OTP's own
+  `-behaviour(...)` attribute in code is syntax, not prose; leave it.
 - **Never use `~n`** in an `io:format`/`logger` format string - use a
   literal `\n` instead.
 - **To print a term without letting it pretty-print across multiple
@@ -47,7 +50,7 @@ Project-specific guidance - read this before making changes.
   (`-doc """ ... """.`) for anything longer, or anything containing a
   literal `"` (triple-quote needs no escaping). Quote code/identifiers
   with single backticks (`` `foo` ``) - this is Markdown, not edoc's
-  `` `foo' `` convention. OTP behaviour callback exports
+  `` `foo' `` convention. OTP behavior callback exports
   (`init/1`, `handle_call/3`, `start_link/0`, `child_spec/0`, ...) don't
   need a `-doc` - they're supervision plumbing, not the module's
   documented API surface.

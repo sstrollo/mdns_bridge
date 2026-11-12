@@ -55,19 +55,34 @@ Version scheme is `YY.MM.N` - two-digit year, two-digit month, and a
 in a given month is `.0`, a second the same month is `.1`, and so on).
 Tags are named exactly the same as the release.
 
-To cut one, tag the commit and push the tag:
+Release notes live in the tag itself: every release tag is an
+*annotated* tag (`git tag -a`), and its message is published as the
+GitHub Release's notes. To cut one, write the notes to a file
+(Markdown), then tag the commit with them and push the tag:
 
 ```sh
-git tag 26.09.0
+git tag -a 26.09.0 --cleanup=verbatim -F release-notes.md
 git push origin 26.09.0
 ```
+
+`--cleanup=verbatim` matters: by default `git tag` strips every line
+starting with `#` from the message as a comment - which silently
+deletes all Markdown headings. `git show 26.09.0` shows the message
+as it will be published.
 
 Pushing a tag matching that shape triggers
 `.github/workflows/release.yml`, which re-validates the tagged commit
 (compile, `erlfmt`, `eunit`, `dialyzer` - a release-time gate, not a
 second full CI matrix run) and then publishes a GitHub Release for that
-tag with auto-generated release notes. Nothing computes the next version
-number for you - decide it yourself before tagging.
+tag, using the tag message as its notes (`gh release create
+--notes-from-tag`). A lightweight tag (plain `git tag`, no message)
+makes that step fail rather than publish a release without notes - if
+that happens, delete the tag locally and remotely and re-create it
+annotated. To fix the notes of an already-published release, edit them
+on GitHub or with `gh release edit <tag> --notes-file <file>`.
+
+Nothing computes the next version number for you - decide it yourself
+before tagging.
 
 `src/mdns_bridge.app.src`'s `vsn` is never hand-edited: the sibling
 `mdns_bridge.app.src.script` overwrites it at every build (local or CI)

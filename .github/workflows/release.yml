@@ -48,10 +48,27 @@ jobs:
       - name: Dialyzer
         run: rebar3 dialyzer
 
+      # Release notes are the annotated tag's message (see
+      # CONTRIBUTING.md). A lightweight tag has no message of its own,
+      # and --notes-from-tag would then quietly publish the tagged
+      # commit's message as the notes instead - so refuse those here.
+      #
+      # Re-fetch the tag first: actions/checkout can leave a pushed
+      # annotated tag as a lightweight ref straight to the commit
+      # (actions/checkout#290), and both this check and gh read the
+      # local tag.
+      - name: Require an annotated tag
+        run: |
+          git fetch --force origin "refs/tags/${{ github.ref_name }}:refs/tags/${{ github.ref_name }}"
+          if [ "$(git cat-file -t "${{ github.ref_name }}")" != tag ]; then
+            echo "::error::${{ github.ref_name }} is a lightweight tag; release tags must be annotated (git tag -a) - see CONTRIBUTING.md"
+            exit 1
+          fi
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \
-            --generate-notes
+            --notes-from-tag
