@@ -56,6 +56,15 @@ through the gen_server.
 %% pauses until this process asks for more - bounds the mailbox under a
 %% flood, at the cost of one setopts call per N packets.
 -define(ACTIVE_N, 100).
+%% RFC 6762 section 6: a given record must not be multicast more than
+%% once per second (except in response to a probe) - otherwise every
+%% query on the segment, legitimate or not, costs everyone a multicast
+%% response.
+-define(MIN_MULTICAST_INTERVAL_MS, 1000).
+%% The last-multicast map is pruned of stale entries once it grows past
+%% this, so it stays bounded by the number of distinct records actually
+%% answered for recently, not by everything ever answered.
+-define(RECENT_PRUNE_SIZE, 256).
 
 %% {Pid, monitor ref watching it} per subscriber of a {Name, Type} -
 %% the ref lets a subscriber be found and demonitored again by
@@ -66,7 +75,10 @@ through the gen_server.
     socket :: gen_udp:socket(),
     iface_ip :: inet:ip4_address(),
     netmask :: inet:ip4_address(),
-    probe_watchers = #{} :: probe_watchers()
+    probe_watchers = #{} :: probe_watchers(),
+    %% {Name, Type} -> monotonic ms it was last multicast (an answer or
+    %% an announcement) - see ?MIN_MULTICAST_INTERVAL_MS.
+    recent_multicast = #{} :: #{{binary(), atom()} => integer()}
 }).
 
 child_spec() ->
@@ -225,7 +237,7 @@ handle_cast({send_query, Name, Type}, State) ->
 handle_cast({announce, Name, Type, Answers}, State) ->
     Rec = mdns_proto:mdns_answer(Name, Type, Answers),
     do_send(Rec, State),
-    {noreply, State};
+    {noreply, note_multicast([{Name, Type}], State)};
 handle_cast({send_probe, Name, Type, Data, Ttl}, State) ->
     Rec = mdns_proto:probe_query(Name, Type, Data, Ttl),
     do_send(Rec, State),
@@ -240,15 +252,17 @@ handle_info({udp, Socket, SrcIp, SrcPort, Packet}, #state{socket = Socket} = Sta
     %% datagram can make it raise instead. The whole per-packet path is
     %% guarded, not just decode, since the same holds for whatever a
     %% decoded-but-nonsensical packet can trip further down.
-    try
-        handle_packet(SrcIp, SrcPort, Packet, State)
-    catch
-        Class:Reason ->
-            logger:debug("mdns_socket: dropped packet from ~0p:~b: ~0p", [
-                SrcIp, SrcPort, {Class, Reason}
-            ])
-    end,
-    {noreply, State};
+    NewState =
+        try
+            handle_packet(SrcIp, SrcPort, Packet, State)
+        catch
+            Class:Reason ->
+                logger:debug("mdns_socket: dropped packet from ~0p:~b: ~0p", [
+                    SrcIp, SrcPort, {Class, Reason}
+                ]),
+                State
+        end,
+    {noreply, NewState};
 handle_info({udp_passive, Socket}, #state{socket = Socket} = State) ->
     ok = inet:setopts(Socket, [{active, ?ACTIVE_N}]),
     {noreply, State};
@@ -268,10 +282,11 @@ handle_packet(SrcIp, SrcPort, Packet, #state{iface_ip = IfaceIp, netmask = Netma
         true ->
             case inet_dns:decode(Packet, true) of
                 {ok, DnsRec} -> handle_decoded(DnsRec, SrcIp, SrcPort, State);
-                {error, _Reason} -> ok
+                {error, _Reason} -> State
             end;
         false ->
-            ?TRACE(dropped_off_link, #{src => SrcIp, port => SrcPort})
+            ?TRACE(dropped_off_link, #{src => SrcIp, port => SrcPort}),
+            State
     end.
 
 %% A response is only believed if it came from port 5353 (RFC 6762
@@ -289,12 +304,14 @@ handle_decoded(#dns_rec{header = #dns_header{qr = IsResponse}} = DnsRec, SrcIp, 
             case foreign_entries(Entries) of
                 [] -> ok;
                 Foreign -> mdns_cache:insert_many(Foreign)
-            end;
+            end,
+            State;
         {true, _OtherPort} ->
-            ?TRACE(dropped_response_port, #{src => SrcIp, port => SrcPort});
+            ?TRACE(dropped_response_port, #{src => SrcIp, port => SrcPort}),
+            State;
         {false, _} ->
             notify_probe_watchers(mdns_proto:extract_watched_records(DnsRec), State),
-            answer_registered_questions(DnsRec, State)
+            answer_registered_questions(DnsRec, SrcIp, SrcPort, State)
     end.
 
 %% Everything in Entries except our own registered records. Those loop
@@ -342,18 +359,96 @@ maybe_notify_conflict(_Name, _Type, _Data, 0) ->
 maybe_notify_conflict(Name, Type, Data, _Ttl) ->
     mdns_registry:notify_conflict(Name, Type, Data).
 
-answer_registered_questions(#dns_rec{qdlist = Qd}, State) ->
-    [answer_if_registered(Q, State) || Q <- Qd],
-    ok.
+%% Answers every question in the packet that a registered record
+%% satisfies. How the answer is sent depends on who asked (RFC 6762):
+%% - from a source port other than 5353: a legacy unicast query (6.7) -
+%%   a plain DNS client, answered by unicast in classic-DNS form;
+%% - a QU question (5.4): answered by unicast to the querier;
+%% - otherwise multicast, so every cache on the segment benefits - but
+%%   never the same record more than once a second (section 6), except
+%%   to answer a probe (one that carries proposals in its authority
+%%   section), where the prober's whole point is to hear from us now.
+answer_registered_questions(
+    #dns_rec{header = Header, qdlist = Qd, nslist = Ns}, SrcIp, SrcPort, State
+) ->
+    IsProbe = Ns =/= [],
+    lists:foldl(
+        fun(Q, S) -> answer_if_registered(Q, Header, IsProbe, SrcIp, SrcPort, S) end, State, Qd
+    ).
 
-answer_if_registered(#dns_query{domain = Domain, type = Type}, State) ->
+answer_if_registered(
+    #dns_query{domain = Domain, type = Type, unicast_response = QU} = Q,
+    Header,
+    IsProbe,
+    SrcIp,
+    SrcPort,
+    State
+) ->
     Name = mdns_proto:normalize_wire_name(Domain),
-    case mdns_registry:answers_for(Name, Type) of
+    case registered_records(Name, Type) of
         [] ->
-            ok;
-        Answers ->
-            do_send(mdns_proto:mdns_answer(Name, Type, Answers), State)
+            State;
+        An when SrcPort =/= ?MDNS_PORT ->
+            do_send_to(
+                mdns_proto:legacy_answer(Header, Q, An, additionals(An)), SrcIp, SrcPort, State
+            ),
+            State;
+        An when QU ->
+            do_send_to(mdns_proto:mdns_response(An, additionals(An)), SrcIp, SrcPort, State),
+            State;
+        An ->
+            case not_recently_multicast(An, IsProbe, State) of
+                [] ->
+                    State;
+                Send ->
+                    do_send(mdns_proto:mdns_response(Send, additionals(Send)), State),
+                    note_multicast([{N, T} || {N, T, _, _} <- Send], State)
+            end
     end.
+
+registered_records(Name, any) ->
+    [{Name, Type, Data, Ttl} || {Type, Data, Ttl} <- mdns_registry:records_for(Name)];
+registered_records(Name, Type) ->
+    [{Name, Type, Data, Ttl} || {Data, Ttl} <- mdns_registry:answers_for(Name, Type)].
+
+%% RFC 6763 section 12: a PTR answer should carry the instance's SRV and
+%% TXT, and an SRV answer (given or implied) the target host's A record,
+%% so a browser doesn't need a round trip per record - as far as we
+%% publish them ourselves.
+additionals(An) ->
+    FromPtr = [R || {_, ptr, Instance, _} <- An, R <- srv_and_txt_of(Instance)],
+    FromSrv = [R || {_, srv, {_, _, _, Host}, _} <- An ++ FromPtr, R <- a_of(Host)],
+    lists:usort(FromPtr ++ FromSrv) -- An.
+
+srv_and_txt_of(Name) ->
+    [
+        {Name, Type, Data, Ttl}
+     || {Type, Data, Ttl} <- mdns_registry:records_for(Name), Type =:= srv orelse Type =:= txt
+    ].
+
+a_of(Name) ->
+    [{Name, a, Data, Ttl} || {Data, Ttl} <- mdns_registry:answers_for(Name, a)].
+
+not_recently_multicast(An, true = _IsProbe, _State) ->
+    An;
+not_recently_multicast(An, false, #state{recent_multicast = Recent}) ->
+    Now = erlang:monotonic_time(millisecond),
+    [
+        R
+     || {Name, Type, _, _} = R <- An,
+        Now - maps:get({Name, Type}, Recent, Now - ?MIN_MULTICAST_INTERVAL_MS) >=
+            ?MIN_MULTICAST_INTERVAL_MS
+    ].
+
+note_multicast(Keys, #state{recent_multicast = Recent0} = State) ->
+    Now = erlang:monotonic_time(millisecond),
+    Recent1 = lists:foldl(fun(Key, Acc) -> Acc#{Key => Now} end, Recent0, Keys),
+    Recent =
+        case map_size(Recent1) > ?RECENT_PRUNE_SIZE of
+            true -> maps:filter(fun(_, T) -> Now - T < ?MIN_MULTICAST_INTERVAL_MS end, Recent1);
+            false -> Recent1
+        end,
+    State#state{recent_multicast = Recent}.
 
 notify_probe_watchers(Records, State) ->
     [notify_one_probe_watcher(R, State) || R <- Records],
@@ -394,5 +489,8 @@ put_or_remove(Key, [], Map) -> maps:remove(Key, Map);
 put_or_remove(Key, Watchers, Map) -> Map#{Key => Watchers}.
 
 do_send(Rec, State) ->
+    do_send_to(Rec, ?MDNS_GROUP, ?MDNS_PORT, State).
+
+do_send_to(Rec, Ip, Port, State) ->
     Packet = inet_dns:encode(Rec, true),
-    gen_udp:send(State#state.socket, ?MDNS_GROUP, ?MDNS_PORT, Packet).
+    gen_udp:send(State#state.socket, Ip, Port, Packet).

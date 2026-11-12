@@ -20,6 +20,125 @@ socket_test_() ->
         ]
     end}.
 
+%% Reactive answering (the responder side of RFC 6762/6763). Legacy
+%% unicast queries - sent from an ephemeral port - are the easiest way
+%% to observe an answer: it comes straight back to the querying socket.
+responder_test_() ->
+    {setup, fun start/0, fun stop/1, fun(_) ->
+        [
+            fun legacy_unicast_query_gets_a_capped_unicast_answer/0,
+            fun any_query_returns_every_registered_type/0,
+            fun ptr_answer_carries_srv_txt_and_a_as_additionals/0,
+            {timeout, 10, fun multicast_answers_are_rate_limited_per_record/0}
+        ]
+    end}.
+
+legacy_unicast_query_gets_a_capped_unicast_answer() ->
+    {ok, Ref, Name} = mdns:register("legacy-q.local", {10, 9, 9, 21}, #{
+        probe => false, validate => false
+    }),
+    Query = (mdns_proto:mdns_query(Name, a))#dns_rec{header = #dns_header{id = 4242}},
+    {ok, Resp} = legacy_query(Query),
+    #dns_rec{header = Header, qdlist = [Q], anlist = [RR]} = Resp,
+    ?assertEqual(4242, Header#dns_header.id),
+    ?assert(Header#dns_header.qr),
+    ?assertEqual(binary_to_list(Name), Q#dns_query.domain),
+    ?assertEqual(binary_to_list(Name), RR#dns_rr.domain),
+    ?assertEqual({10, 9, 9, 21}, RR#dns_rr.data),
+    %% RFC 6762 6.7: TTL capped at 10 for a legacy client, no cache-flush.
+    ?assert(RR#dns_rr.ttl =< 10),
+    ?assertNot(RR#dns_rr.func),
+    ok = mdns:unregister(Ref).
+
+any_query_returns_every_registered_type() ->
+    {ok, Ref, Name} = mdns:register_service(
+        "Any Svc", "_anysvc._tcp", 8080, [{"k", "v"}], "anyhost.local", #{probe => false}
+    ),
+    {ok, #dns_rec{anlist = An}} = legacy_query(mdns_proto:mdns_query(Name, any)),
+    ?assertEqual([srv, txt], lists:sort([RR#dns_rr.type || RR <- An])),
+    ok = mdns:unregister(Ref).
+
+ptr_answer_carries_srv_txt_and_a_as_additionals() ->
+    Opts = #{probe => false, validate => false},
+    {ok, HostRef, _} = mdns:register("addl-host.local", {10, 9, 9, 22}, Opts),
+    {ok, SvcRef, Instance} = mdns:register_service(
+        "Addl Svc", "_addl._tcp", 8080, [], "addl-host.local", #{probe => false}
+    ),
+    {ok, #dns_rec{anlist = An, arlist = Ar}} = legacy_query(
+        mdns_proto:mdns_query(~"_addl._tcp.local", ptr)
+    ),
+    ?assertMatch([#dns_rr{type = ptr}], An),
+    ?assertEqual(binary_to_list(Instance), (hd(An))#dns_rr.data),
+    ?assertEqual(
+        lists:sort([
+            {"addl-host.local", a}, {binary_to_list(Instance), srv}, {binary_to_list(Instance), txt}
+        ]),
+        lists:sort([{RR#dns_rr.domain, RR#dns_rr.type} || RR <- Ar])
+    ),
+    ok = mdns:unregister(SvcRef),
+    ok = mdns:unregister(HostRef).
+
+%% RFC 6762 section 6: the same record is multicast at most once per
+%% second in response to queries - except to answer a probe. Observed by
+%% a second member of the group.
+multicast_answers_are_rate_limited_per_record() ->
+    {ok, Ref, Name} = mdns:register("rate-limited.local", {10, 9, 9, 23}, #{
+        probe => false, validate => false
+    }),
+    %% The announcement counts as a multicast of the record, and so does
+    %% mdns_registry's follow-up announcement one second later.
+    timer:sleep(2100),
+    Listener = open_group_listener(),
+    Query = inet_dns:encode(mdns_proto:mdns_query(Name, a), true),
+    multicast_from(5353, Query),
+    timer:sleep(100),
+    multicast_from(5353, Query),
+    ?assertEqual(1, count_answers(Listener, binary_to_list(Name), 600)),
+    timer:sleep(1000),
+    Probe = inet_dns:encode(mdns_proto:probe_query(Name, a, {10, 9, 9, 99}, 120), true),
+    multicast_from(5353, Probe),
+    timer:sleep(100),
+    multicast_from(5353, Probe),
+    ?assertEqual(2, count_answers(Listener, binary_to_list(Name), 600)),
+    gen_udp:close(Listener),
+    ok = mdns:unregister(Ref).
+
+%% Multicasts Query from an ephemeral port - a legacy unicast query as
+%% far as the responder is concerned - and returns the unicast answer
+%% that comes back to the same socket.
+legacy_query(Query) ->
+    {ok, {IfaceIp, _Netmask}} = mdns_iface:resolve_with_netmask(undefined),
+    {ok, S} = gen_udp:open(0, [
+        binary, {active, false}, {multicast_if, IfaceIp}, {multicast_loop, true}
+    ]),
+    ok = gen_udp:send(S, {224, 0, 0, 251}, 5353, inet_dns:encode(Query, true)),
+    Result =
+        case gen_udp:recv(S, 0, 1000) of
+            {ok, {_Ip, _Port, Packet}} -> inet_dns:decode(Packet, false);
+            {error, _} = Err -> Err
+        end,
+    gen_udp:close(S),
+    Result.
+
+count_answers(S, Domain, TimeoutMs) ->
+    Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
+    count_answers_until(S, Domain, Deadline, 0).
+
+count_answers_until(S, Domain, Deadline, Count) ->
+    Left = Deadline - erlang:monotonic_time(millisecond),
+    case Left > 0 andalso gen_udp:recv(S, 0, Left) of
+        {ok, {_Ip, _Port, Packet}} ->
+            case inet_dns:decode(Packet, true) of
+                {ok, #dns_rec{header = #dns_header{qr = true}, anlist = An}} ->
+                    Hits = [D || #dns_rr{domain = D, type = a} <- An, D =:= Domain],
+                    count_answers_until(S, Domain, Deadline, Count + length(Hits));
+                _ ->
+                    count_answers_until(S, Domain, Deadline, Count)
+            end;
+        _ ->
+            Count
+    end.
+
 %% Started in mdns_sup's order: mdns_socket hands every packet it
 %% receives (including its own, via multicast loopback) to mdns_cache and
 %% mdns_registry, so both must exist once anything is sent.

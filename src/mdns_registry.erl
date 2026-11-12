@@ -77,6 +77,7 @@ accepted.
     unregister/1,
     withdraw_all/0,
     answers_for/2,
+    records_for/1,
     notify_conflict/3,
     refresh_interface/0
 ]).
@@ -239,6 +240,18 @@ answers_for(Name, Type) ->
     [
         {Data, Ttl}
      || [Data, Ttl] <- ets:match(?TAB, {{Name, Type, '$1'}, #{ttl => '$2'}})
+    ].
+
+-doc """
+Every published `{Type, Data, Ttl}` under Name, whatever the type - a
+direct table read. Serves type `any` questions and the additional
+records that go alongside a PTR or SRV answer (RFC 6763 section 12).
+""".
+-spec records_for(binary()) -> [{atom(), term(), non_neg_integer()}].
+records_for(Name) ->
+    [
+        {Type, Data, Ttl}
+     || [Type, Data, Ttl] <- ets:match(?TAB, {{Name, '$1', '$2'}, #{ttl => '$3'}})
     ].
 
 -doc """

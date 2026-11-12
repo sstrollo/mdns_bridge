@@ -27,6 +27,8 @@ back to this app's binary form.
     is_local/1,
     mdns_query/2,
     mdns_answer/3,
+    mdns_response/2,
+    legacy_answer/4,
     probe_query/4,
     extract_answers/1,
     extract_watched_records/1,
@@ -41,6 +43,12 @@ back to this app's binary form.
 
 -define(CLASS_IN, in).
 -define(LOCAL_SUFFIX, ~".local").
+
+%% A record as the response builders below take it.
+-type record() :: {
+    Name :: binary(), Type :: atom(), Data :: term(), Ttl :: non_neg_integer()
+}.
+-export_type([record/0]).
 
 -doc "Lowercase Name and strip a trailing `.` - DNS names are case-insensitive; used as the cache/registry key everywhere in this app.".
 -spec normalize_name(string() | binary()) -> binary().
@@ -169,20 +177,61 @@ published records.
 """.
 -spec mdns_answer(binary(), atom(), [{term(), non_neg_integer()}]) -> #dns_rec{}.
 mdns_answer(Name, Type, Answers) ->
+    mdns_response([{Name, Type, Data, Ttl} || {Data, Ttl} <- Answers], []).
+
+-doc """
+Like `mdns_answer/3`, for any mix of names/types: An goes in the
+answer section, Ar in the additional section (RFC 6763 section 12's
+SRV/TXT/A records alongside a PTR answer, say). The cache-flush bit is
+set on every record except PTR - a PTR here is RFC 6763's shared
+service-enumeration record, and RFC 6762 10.2 forbids the bit on a
+shared record (it would wipe every *other* instance of the service
+type from the receiver's cache).
+""".
+-spec mdns_response([record()], [record()]) -> #dns_rec{}.
+mdns_response(An, Ar) ->
     Header = #dns_header{id = 0, qr = 1, opcode = 0, aa = 1},
-    Domain = to_domain(Name),
-    AnList = [
-        #dns_rr{
-            domain = Domain,
-            type = Type,
-            class = ?CLASS_IN,
-            ttl = Ttl,
-            data = to_wire_data(Type, Data),
-            func = true
-        }
-     || {Data, Ttl} <- Answers
-    ],
-    #dns_rec{header = Header, qdlist = [], anlist = AnList, nslist = [], arlist = []}.
+    #dns_rec{
+        header = Header,
+        qdlist = [],
+        anlist = [rr(R, true) || R <- An],
+        nslist = [],
+        arlist = [rr(R, true) || R <- Ar]
+    }.
+
+-define(LEGACY_TTL_CAP, 10).
+
+-doc """
+Build the response to a legacy unicast query (RFC 6762 6.7: one that
+arrived from a source port other than 5353 - a plain DNS client, not an
+mDNS responder) for `Question` from a request with `ReqHeader`: the
+request's id and the question are echoed, the cache-flush bit isn't
+used, and every TTL is capped at 10 seconds, since a legacy client
+won't see the goodbye or cache-flush traffic that keeps an mDNS cache
+honest.
+""".
+-spec legacy_answer(#dns_header{}, #dns_query{}, [record()], [record()]) -> #dns_rec{}.
+legacy_answer(ReqHeader, Question, An, Ar) ->
+    Header = ReqHeader#dns_header{qr = 1, aa = 1, tc = 0, ra = 0, rcode = 0},
+    #dns_rec{
+        header = Header,
+        qdlist = [Question],
+        anlist = [rr(cap_ttl(R), false) || R <- An],
+        nslist = [],
+        arlist = [rr(cap_ttl(R), false) || R <- Ar]
+    }.
+
+cap_ttl({Name, Type, Data, Ttl}) -> {Name, Type, Data, min(Ttl, ?LEGACY_TTL_CAP)}.
+
+rr({Name, Type, Data, Ttl}, CacheFlush) ->
+    #dns_rr{
+        domain = to_domain(Name),
+        type = Type,
+        class = ?CLASS_IN,
+        ttl = Ttl,
+        data = to_wire_data(Type, Data),
+        func = CacheFlush andalso Type =/= ptr
+    }.
 
 -doc """
 Build an RFC 6762 8.1 probe query: a question for Type records of Name,

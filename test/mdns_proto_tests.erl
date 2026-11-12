@@ -120,6 +120,36 @@ mdns_query_test() ->
     [Q] = Rec#dns_rec.qdlist,
     ?assertNot(Q#dns_query.unicast_response).
 
+%% RFC 6762 10.2: the cache-flush bit on a shared record (a DNS-SD PTR)
+%% would wipe every other instance from the receiver's cache.
+mdns_response_sets_cache_flush_on_all_but_ptr_test() ->
+    Rec = mdns_proto:mdns_response(
+        [
+            {~"_http._tcp.local", ptr, ~"x._http._tcp.local", 4500},
+            {~"x._http._tcp.local", srv, {0, 0, 80, ~"h.local"}, 4500}
+        ],
+        [{~"h.local", a, {10, 0, 0, 1}, 120}]
+    ),
+    {ok, Dec} = inet_dns:decode(inet_dns:encode(Rec, true), true),
+    ?assertEqual(
+        [{ptr, false}, {srv, true}], [{T, F} || #dns_rr{type = T, func = F} <- Dec#dns_rec.anlist]
+    ),
+    ?assertEqual([{a, true}], [{T, F} || #dns_rr{type = T, func = F} <- Dec#dns_rec.arlist]).
+
+legacy_answer_test() ->
+    Q = #dns_query{domain = "h.local", type = a, class = in},
+    ReqHeader = #dns_header{id = 77, rd = true},
+    Rec = mdns_proto:legacy_answer(ReqHeader, Q, [{~"h.local", a, {10, 0, 0, 1}, 120}], []),
+    {ok, Dec} = inet_dns:decode(inet_dns:encode(Rec, true), false),
+    #dns_rec{header = H, qdlist = [DecQ], anlist = [RR]} = Dec,
+    ?assertEqual(77, H#dns_header.id),
+    ?assert(H#dns_header.qr),
+    ?assert(H#dns_header.aa),
+    ?assertEqual("h.local", DecQ#dns_query.domain),
+    %% TTL capped at 10, plain class IN (no cache-flush bit)
+    ?assertEqual(10, RR#dns_rr.ttl),
+    ?assertEqual(in, RR#dns_rr.class).
+
 extract_answers_test() ->
     RrA = #dns_rr{
         domain = "Widget.Local",
