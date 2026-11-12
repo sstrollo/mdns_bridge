@@ -7,8 +7,43 @@ normalize_name_test_() ->
     [
         ?_assertEqual(~"foo.local", mdns_proto:normalize_name("Foo.Local")),
         ?_assertEqual(~"foo.local", mdns_proto:normalize_name("foo.local.")),
-        ?_assertEqual(~"foo.local", mdns_proto:normalize_name(~"FOO.LOCAL"))
+        ?_assertEqual(~"foo.local", mdns_proto:normalize_name(~"FOO.LOCAL")),
+        %% Multiple trailing dots are all stripped.
+        ?_assertEqual(~"foo.local", mdns_proto:normalize_name(~"foo.local..")),
+        %% UTF-8 multi-byte content is passed through untouched (ASCII-only
+        %% case folding) rather than Unicode-case-folded.
+        ?_assertEqual(
+            unicode:characters_to_binary("café.local"),
+            mdns_proto:normalize_name(unicode:characters_to_binary("café.local"))
+        ),
+        %% A wire name that is NOT valid UTF-8 (a label byte of 0xFF is
+        %% legal on the wire, invalid UTF-8) must normalize without
+        %% crashing - string:lowercase/1 would throw badarg here, which on
+        %% the inbound path would crash mdns_socket. See
+        %% malformed_name_inbound_does_not_crash_test/0.
+        ?_assertEqual(
+            <<16#ff, ".local">>, mdns_proto:normalize_name(<<16#ff, ".LOCAL.">>)
+        )
     ].
+
+%% A crafted inbound mDNS record whose name contains a non-UTF-8 byte must
+%% be processed by the real extract_answers/1 path (the one mdns_socket
+%% runs on every packet) without raising - otherwise a single multicast
+%% packet from anyone on the segment crashes the socket gen_server.
+malformed_name_inbound_does_not_crash_test() ->
+    Rr = #dns_rr{
+        domain = [16#ff | "local"],
+        type = a,
+        class = in,
+        ttl = 120,
+        data = {10, 0, 0, 1},
+        func = true
+    },
+    Rec = #dns_rec{header = #dns_header{}, anlist = [Rr], arlist = []},
+    ?assertEqual(
+        [{<<16#ff, "local">>, a, {10, 0, 0, 1}, 120, true}],
+        mdns_proto:extract_answers(Rec)
+    ).
 
 is_local_test_() ->
     [

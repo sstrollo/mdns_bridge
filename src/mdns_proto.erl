@@ -41,10 +41,31 @@ back to this app's binary form.
 -doc "Lowercase Name and strip a trailing `.` - DNS names are case-insensitive; used as the cache/registry key everywhere in this app.".
 -spec normalize_name(string() | binary()) -> binary().
 normalize_name(Name) ->
-    %% string:trim/3's "trailing" direction strips every trailing "." rather
-    %% than just one - a domain name would never legitimately have more than
-    %% one anyway, so that's a difference without a practical case.
-    string:lowercase(string:trim(to_binary(Name), trailing, [$.])).
+    %% Case-fold ASCII only (RFC 4343: DNS case-insensitivity is defined
+    %% solely for A-Z), byte-wise over the raw binary - never via
+    %% string:lowercase/1. A decoded wire name is arbitrary bytes, only
+    %% *recommended* (not required) to be UTF-8 by RFC 6762/6763, and
+    %% string:lowercase/1 throws `badarg` on any binary that isn't valid
+    %% UTF-8 - so a single crafted inbound packet with a non-UTF-8 label
+    %% would otherwise crash this (on the hot inbound path in
+    %% mdns_socket). Working on bytes also avoids Unicode case-folding a
+    %% name in ways DNS doesn't intend. Trailing "." bytes are stripped
+    %% the same way - more than one is never legitimate, but strip all of
+    %% them rather than assume.
+    ascii_lowercase(strip_trailing_dots(to_binary(Name))).
+
+strip_trailing_dots(Bin) ->
+    Size = byte_size(Bin),
+    case Size > 0 andalso binary:at(Bin, Size - 1) =:= $. of
+        true -> strip_trailing_dots(binary:part(Bin, 0, Size - 1));
+        false -> Bin
+    end.
+
+ascii_lowercase(Bin) ->
+    <<<<(lower_byte(B))>> || <<B>> <= Bin>>.
+
+lower_byte(B) when B >= $A, B =< $Z -> B + 32;
+lower_byte(B) -> B.
 
 -doc "Whether Name (already `normalize_name/1`'d) is `.local` or exactly `local` itself.".
 -spec is_local(binary()) -> boolean().
