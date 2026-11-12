@@ -21,6 +21,7 @@ registry_test_() ->
             fun rejects_non_local_name/0,
             fun rejects_invalid_address_shape/0,
             fun rejects_out_of_range_address/0,
+            fun rejects_names_that_cannot_be_encoded/0,
             fun rejects_non_boolean_validate_option_without_crashing/0,
             fun rejects_non_boolean_probe_option/0,
             fun rejects_invalid_on_conflict_option/0,
@@ -48,6 +49,7 @@ service_test_() ->
             fun rejects_bad_port/0,
             fun rejects_non_local_target_host/0,
             fun rejects_validate_option_for_services/0,
+            fun rejects_service_names_and_txt_that_cannot_be_encoded/0,
             fun reregistering_an_instance_with_new_txt_replaces_the_old_txt/0,
             fun reregistering_an_identical_instance_does_not_leak_the_meta_ptr/0,
             fun takeover_of_the_last_instance_of_a_type_keeps_the_meta_ptr/0
@@ -191,6 +193,34 @@ rejects_validate_option_for_services() ->
             "X", "_http._tcp", 80, [], service_local_target(9), #{validate => false}
         )
     ).
+
+rejects_service_names_and_txt_that_cannot_be_encoded() ->
+    Opts = #{probe => false},
+    Target = service_local_target(23),
+    ?assertMatch(
+        {error, {invalid_name, _, label_too_long}},
+        mdns_registry:register_service(
+            lists:duplicate(64, $i), "_http._tcp", 80, [], Target, Opts
+        )
+    ),
+    ?assertMatch(
+        {error, {invalid_name, _, label_too_long}},
+        mdns_registry:register_service(
+            "Ok Label", "_http._tcp", 80, [], lists:duplicate(64, $t) ++ ".local", Opts
+        )
+    ),
+    ?assertMatch(
+        {error, {txt_string_too_long, _}},
+        mdns_registry:register_service(
+            "Ok Label", "_http._tcp", 80, [{"k", lists:duplicate(254, $v)}], Target, Opts
+        )
+    ),
+    %% ...and the limit is 255 bytes per string, not 254: a 253-byte
+    %% value plus "k=" is exactly 255.
+    {ok, Ref, _} = mdns_registry:register_service(
+        "Ok Label", "_http._tcp", 80, [{"k", lists:duplicate(253, $v)}], Target, Opts
+    ),
+    ok = mdns_registry:unregister(Ref).
 
 %% Updating a service's TXT record by registering the same instance again
 %% is the normal way to change it. The previous registration shares the
@@ -360,6 +390,31 @@ rejects_out_of_range_address() ->
     ?assertMatch(
         {error, {invalid_address, _}},
         mdns_registry:register("test-bad-range.local", {999, -5, 300, 1}, #{validate => false})
+    ).
+
+%% inet_dns:encode/2 raises on a label over 63 bytes, an empty label, or
+%% a name over 255 wire bytes - and it would do so inside mdns_socket,
+%% on every announcement, for as long as the name stayed registered.
+%% Such names are refused up front instead.
+rejects_names_that_cannot_be_encoded() ->
+    Ip = sibling_ip(32),
+    Opts = #{probe => false},
+    ?assertMatch(
+        {error, {invalid_name, _, label_too_long}},
+        mdns_registry:register(lists:duplicate(64, $a) ++ ".local", Ip, Opts)
+    ),
+    ?assertMatch(
+        {error, {invalid_name, _, empty_label}},
+        mdns_registry:register("double..dot.local", Ip, Opts)
+    ),
+    ?assertMatch(
+        {error, {invalid_name, _, name_too_long}},
+        mdns_registry:register(
+            lists:flatten(lists:join(".", lists:duplicate(5, lists:duplicate(60, $x)))) ++
+                ".local",
+            Ip,
+            Opts
+        )
     ).
 
 %% A crashing gen_server here would destroy mdns_registry_tab and drop

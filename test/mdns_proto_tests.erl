@@ -45,6 +45,48 @@ malformed_name_inbound_does_not_crash_test() ->
         mdns_proto:extract_answers(Rec)
     ).
 
+validate_name_test_() ->
+    Label63 = binary:copy(~"a", 63),
+    Label64 = binary:copy(~"a", 64),
+    %% 4 x 62-byte labels: 4 * (1 + 62) + 1 = 253 wire bytes, fits.
+    Name253 = iolist_to_binary(lists:join(".", [binary:copy(~"b", 62) || _ <- lists:seq(1, 4)])),
+    %% 4 x 63-byte labels: 4 * 64 + 1 = 257, doesn't.
+    Name257 = iolist_to_binary(lists:join(".", [Label63 || _ <- lists:seq(1, 4)])),
+    [
+        ?_assertEqual(ok, mdns_proto:validate_name(~"printer.local")),
+        ?_assertEqual(ok, mdns_proto:validate_name(<<Label63/binary, ".local">>)),
+        ?_assertEqual(
+            {error, label_too_long}, mdns_proto:validate_name(<<Label64/binary, ".local">>)
+        ),
+        ?_assertEqual({error, empty_label}, mdns_proto:validate_name(~"foo..local")),
+        ?_assertEqual({error, empty_label}, mdns_proto:validate_name(~".local")),
+        ?_assertEqual({error, empty_label}, mdns_proto:validate_name(<<>>)),
+        ?_assertEqual(ok, mdns_proto:validate_name(Name253)),
+        ?_assertEqual({error, name_too_long}, mdns_proto:validate_name(Name257)),
+        %% Escapes count as one wire byte: 62 chars + "\." = 63 bytes on
+        %% the wire even though the binary is 64 long (63 + "\." is 64,
+        %% too long); and a lone escaped dot is a 1-byte label, not an
+        %% empty one.
+        ?_assertEqual(
+            ok, mdns_proto:validate_name(<<(binary:copy(~"c", 62))/binary, "\\.._http._tcp.local">>)
+        ),
+        ?_assertEqual(
+            {error, label_too_long},
+            mdns_proto:validate_name(<<(binary:copy(~"c", 63))/binary, "\\.._http._tcp.local">>)
+        ),
+        ?_assertEqual(ok, mdns_proto:validate_name(~"\\.._http._tcp.local"))
+    ].
+
+validate_txt_data_test_() ->
+    [
+        ?_assertEqual(ok, mdns_proto:validate_txt_data([<<>>])),
+        ?_assertEqual(ok, mdns_proto:validate_txt_data([~"a=b", binary:copy(~"k", 255)])),
+        ?_assertMatch(
+            {error, {txt_string_too_long, _}},
+            mdns_proto:validate_txt_data([~"a=b", binary:copy(~"k", 256)])
+        )
+    ].
+
 is_local_test_() ->
     [
         ?_assert(mdns_proto:is_local(~"foo.local")),

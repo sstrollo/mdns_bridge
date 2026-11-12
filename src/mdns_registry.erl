@@ -197,7 +197,9 @@ register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost, Opts) when
         {error, _} = Err ->
             Err;
         ok ->
-            case validate_service_args(ServiceType, Port, TargetHost) of
+            TxtData = mdns_proto:build_txt_data(TxtKVs),
+            Target = mdns_proto:normalize_name(TargetHost),
+            case validate_service_args(ServiceType, Port, Target, TxtData) of
                 {error, _} = Err ->
                     Err;
                 ok ->
@@ -205,8 +207,8 @@ register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost, Opts) when
                         service_type => ServiceType,
                         service_type_name => mdns_proto:service_type_name(ServiceType),
                         port => Port,
-                        txt => mdns_proto:build_txt_data(TxtKVs),
-                        target => mdns_proto:normalize_name(TargetHost),
+                        txt => TxtData,
+                        target => Target,
                         opts => Opts
                     },
                     attempt_register_service(InstanceName, Ctx, 1)
@@ -316,8 +318,11 @@ handle_info(_Msg, State) ->
 
 %% -- register/2,3's probing + rename loop (runs in the caller's process) --
 
+%% Validated here rather than once in register/3 so a renamed candidate
+%% (from `auto`/`{rename, Fun}`) is held to the same standard as the
+%% original: a Fun can hand back anything.
 attempt_register(OriginalName, CandidateName, Ip, Opts, Attempt) ->
-    case gen_server:call(?SERVER, {precheck, CandidateName, Ip, Opts}) of
+    case precheck(CandidateName, Ip, Opts) of
         {error, _} = Err ->
             Err;
         ok ->
@@ -345,6 +350,18 @@ attempt_register(OriginalName, CandidateName, Ip, Opts, Attempt) ->
             end
     end.
 
+precheck(Name, Ip, Opts) ->
+    case valid_name(Name) of
+        ok -> gen_server:call(?SERVER, {precheck, Name, Ip, Opts});
+        {error, _} = Err -> Err
+    end.
+
+valid_name(Name) ->
+    case mdns_proto:validate_name(Name) of
+        ok -> ok;
+        {error, Reason} -> {error, {invalid_name, Name, Reason}}
+    end.
+
 commit(Name, Ip, Opts) ->
     case gen_server:call(?SERVER, {commit, Name, Ip, Opts}) of
         {ok, Ref} -> {ok, Ref, Name};
@@ -356,10 +373,12 @@ commit(Name, Ip, Opts) ->
 attempt_register_service(InstanceLabel, Ctx, Attempt) ->
     #{service_type := ServiceType, opts := Opts} = Ctx,
     InstanceFullName = mdns_proto:service_instance_name(InstanceLabel, ServiceType),
-    case maps:get(probe, Opts, true) of
-        false ->
+    case {valid_name(InstanceFullName), maps:get(probe, Opts, true)} of
+        {{error, _} = Err, _} ->
+            Err;
+        {ok, false} ->
             commit_service(InstanceFullName, Ctx);
-        true ->
+        {ok, true} ->
             case probe_service(InstanceFullName, Ctx) of
                 no_conflict ->
                     commit_service(InstanceFullName, Ctx);
@@ -566,23 +585,29 @@ validate_subnet(Ip, State) ->
     end.
 
 %% ServiceType must look like "_app._tcp"/"_app._udp"; Port must be a
-%% real port number; TargetHost must be a `.local` name (not required to
-%% be one this app itself has registered).
-validate_service_args(ServiceType, Port, TargetHost) ->
+%% real port number; Target (normalized) must be an encodable `.local`
+%% name (not required to be one this app itself has registered); every
+%% TXT string must fit its length prefix.
+validate_service_args(ServiceType, Port, Target, TxtData) ->
     case is_valid_service_type(ServiceType) of
         false ->
             {error, {invalid_service_type, ServiceType}};
         true ->
             case ?is_port_number(Port) of
-                false -> {error, {invalid_port, Port}};
-                true -> validate_target_host(TargetHost)
+                false ->
+                    {error, {invalid_port, Port}};
+                true ->
+                    case validate_target_host(Target) of
+                        ok -> mdns_proto:validate_txt_data(TxtData);
+                        {error, _} = Err -> Err
+                    end
             end
     end.
 
-validate_target_host(TargetHost) ->
-    case mdns_proto:is_local(mdns_proto:normalize_name(TargetHost)) of
-        true -> ok;
-        false -> {error, {not_local, TargetHost}}
+validate_target_host(Target) ->
+    case mdns_proto:is_local(Target) of
+        true -> valid_name(Target);
+        false -> {error, {not_local, Target}}
     end.
 
 is_valid_service_type(ServiceType) ->

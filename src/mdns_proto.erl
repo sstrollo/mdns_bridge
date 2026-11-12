@@ -22,6 +22,8 @@ back to this app's binary form.
 -export([
     normalize_name/1,
     normalize_wire_name/1,
+    validate_name/1,
+    validate_txt_data/1,
     is_local/1,
     mdns_query/2,
     mdns_answer/3,
@@ -78,6 +80,57 @@ ascii_lowercase(Bin) ->
 
 lower_byte(B) when B >= $A, B =< $Z -> B + 32;
 lower_byte(B) -> B.
+
+-define(MAX_LABEL_BYTES, 63).
+-define(MAX_NAME_WIRE_BYTES, 255).
+-define(MAX_TXT_STRING_BYTES, 255).
+
+-doc """
+Whether Name (already `normalize_name/1`'d) can actually be put on the
+wire: every label 1-63 bytes (RFC 1035 2.3.4), and the whole name at
+most 255 bytes in wire form. Lengths are counted after undoing
+presentation-format escaping, the way `inet_dns` encodes: `\.` and
+`\\` are one byte each on the wire (see `escape_label/1`).
+
+Anything that fails this would make `inet_dns:encode/2` raise - and
+since that runs in `mdns_socket` for every announcement of a
+registered name, such a name must be refused at registration time, not
+discovered one crash per re-announcement later.
+""".
+-spec validate_name(binary()) -> ok | {error, empty_label | label_too_long | name_too_long}.
+validate_name(Name) ->
+    check_labels(label_lengths(Name, 0, []), 1).
+
+%% Unescaped byte length of each label, in order. Any byte following a
+%% backslash is literal (one wire byte for the pair); a bare "." ends
+%% the label.
+label_lengths(<<$\\, _, Rest/binary>>, Len, Acc) -> label_lengths(Rest, Len + 1, Acc);
+label_lengths(<<$., Rest/binary>>, Len, Acc) -> label_lengths(Rest, 0, [Len | Acc]);
+label_lengths(<<_, Rest/binary>>, Len, Acc) -> label_lengths(Rest, Len + 1, Acc);
+label_lengths(<<>>, Len, Acc) -> lists:reverse([Len | Acc]).
+
+%% WireSize starts at 1 for the terminating root label; each label costs
+%% its length byte plus its content.
+check_labels([0 | _], _WireSize) ->
+    {error, empty_label};
+check_labels([Len | _], _WireSize) when Len > ?MAX_LABEL_BYTES ->
+    {error, label_too_long};
+check_labels([Len | Rest], WireSize) ->
+    check_labels(Rest, WireSize + 1 + Len);
+check_labels([], WireSize) when WireSize > ?MAX_NAME_WIRE_BYTES ->
+    {error, name_too_long};
+check_labels([], _WireSize) ->
+    ok.
+
+-doc """
+Whether every string of a TXT record (as built by `build_txt_data/1`)
+fits its one-byte length prefix (RFC 6763 6.1: at most 255 bytes each)
+- `inet_dns:encode/2` raises on a longer one.
+""".
+-spec validate_txt_data([binary()]) -> ok | {error, {txt_string_too_long, binary()}}.
+validate_txt_data([S | Rest]) when byte_size(S) =< ?MAX_TXT_STRING_BYTES -> validate_txt_data(Rest);
+validate_txt_data([S | _]) -> {error, {txt_string_too_long, S}};
+validate_txt_data([]) -> ok.
 
 -doc "Whether Name (already `normalize_name/1`'d) is `.local` or exactly `local` itself.".
 -spec is_local(binary()) -> boolean().
