@@ -6,6 +6,7 @@ socket_test_() ->
     {setup, fun start/0, fun stop/1, fun(_) ->
         [
             fun refresh_interface_is_a_noop_when_unchanged/0,
+            fun refresh_interface_survives_an_address_change_either_way/0,
             fun probe_subscribe_and_unsubscribe_update_state/0,
             fun a_dead_probe_watcher_does_not_leak/0,
             fun non_latin1_name_does_not_crash_socket/0,
@@ -31,6 +32,28 @@ refresh_interface_is_a_noop_when_unchanged() ->
     %% Nothing about the configured interface has actually changed here,
     %% so this just exercises the re-resolve path without rejoining
     %% anything - mostly a guard against it crashing/hanging.
+    ?assertEqual(ok, mdns_socket:refresh_interface()).
+
+%% Point the configured interface at the loopback address and back: a
+%% real change of address, exercising both the leave (on an address the
+%% socket may or may not be able to leave) and the join (loopback often
+%% can't do multicast at all, so this may legitimately fail). Whatever
+%% the OS says to each, the process must survive and be usable - and
+%% restoring the config must get us back onto the original interface.
+refresh_interface_survives_an_address_change_either_way() ->
+    Pid = whereis(mdns_socket),
+    Original = application:get_env(mdns_bridge, interface),
+    application:set_env(mdns_bridge, interface, "127.0.0.1"),
+    try
+        ?assertMatch(R when R =:= ok; element(1, R) =:= error, mdns_socket:refresh_interface())
+    after
+        case Original of
+            {ok, Value} -> application:set_env(mdns_bridge, interface, Value);
+            undefined -> application:unset_env(mdns_bridge, interface)
+        end
+    end,
+    ?assertEqual(Pid, whereis(mdns_socket)),
+    ?assertEqual(ok, mdns_socket:refresh_interface()),
     ?assertEqual(ok, mdns_socket:refresh_interface()).
 
 %% mdns_registry_probe_tests covers the real subscribe -> send_probe ->

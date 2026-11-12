@@ -151,17 +151,35 @@ open_socket(IfaceIp) ->
     ],
     gen_udp:open(?MDNS_PORT, Opts).
 
-handle_call(refresh_interface, _From, State) ->
+handle_call(refresh_interface, _From, #state{socket = Socket, iface_ip = OldIp} = State) ->
     IfaceConfig = application:get_env(mdns_bridge, interface, undefined),
     case mdns_iface:resolve(IfaceConfig) of
-        {ok, NewIp} when NewIp =/= State#state.iface_ip ->
-            OldIp = State#state.iface_ip,
-            ok = inet:setopts(State#state.socket, [{drop_membership, {?MDNS_GROUP, OldIp}}]),
-            ok = inet:setopts(State#state.socket, [
-                {add_membership, {?MDNS_GROUP, NewIp}}, {multicast_if, NewIp}
-            ]),
-            logger:info("mdns_socket: interface changed ~0p -> ~0p", [OldIp, NewIp]),
-            {reply, ok, State#state{iface_ip = NewIp}};
+        {ok, NewIp} when NewIp =/= OldIp ->
+            %% Leaving the group on the old address is best-effort: by
+            %% the time the embedder calls this, that address has usually
+            %% already gone away (which is why it's calling), and
+            %% dropping a membership on a vanished address fails - that
+            %% must not take this process (and its probe watchers) down.
+            case inet:setopts(Socket, [{drop_membership, {?MDNS_GROUP, OldIp}}]) of
+                ok ->
+                    ok;
+                {error, DropReason} ->
+                    logger:info("mdns_socket: could not leave group on ~0p (~0p), continuing", [
+                        OldIp, DropReason
+                    ])
+            end,
+            case
+                inet:setopts(Socket, [{add_membership, {?MDNS_GROUP, NewIp}}, {multicast_if, NewIp}])
+            of
+                ok ->
+                    logger:info("mdns_socket: interface changed ~0p -> ~0p", [OldIp, NewIp]),
+                    {reply, ok, State#state{iface_ip = NewIp}};
+                {error, JoinReason} ->
+                    logger:warning("mdns_socket: could not join group on ~0p: ~0p", [
+                        NewIp, JoinReason
+                    ]),
+                    {reply, {error, {join_failed, NewIp, JoinReason}}, State}
+            end;
         {ok, _UnchangedIp} ->
             {reply, ok, State};
         {error, Reason} ->
