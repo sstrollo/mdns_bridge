@@ -10,7 +10,8 @@ are binaries everywhere in this app, except at the exact points they
 cross into/out of `inet_dns`: its vendored record shapes
 (`mdns_dns.hrl`) require a plain Erlang `string()` for any
 domain-name-shaped field on encode, and always hand one back on
-decode - as a list of raw wire bytes, not Unicode codepoints. TXT
+decode - in both directions a list of raw wire bytes (each element is
+written/read as exactly one byte), not Unicode codepoints. TXT
 record strings are the one exception on encode: `inet_dns` accepts
 binaries for those directly, so only the decode side needs converting
 back to this app's binary form.
@@ -20,6 +21,7 @@ back to this app's binary form.
 
 -export([
     normalize_name/1,
+    normalize_wire_name/1,
     is_local/1,
     mdns_query/2,
     mdns_answer/3,
@@ -53,6 +55,16 @@ normalize_name(Name) ->
     %% the same way - more than one is never legitimate, but strip all of
     %% them rather than assume.
     ascii_lowercase(strip_trailing_dots(to_binary(Name))).
+
+-doc """
+`normalize_name/1` for a domain name exactly as `inet_dns:decode/2`
+hands it back: a list of raw wire bytes, not Unicode codepoints. Use
+this, never `normalize_name/1`, for any name taken from a decoded
+packet (a question, an RR's owner name, a PTR/SRV target).
+""".
+-spec normalize_wire_name(string() | binary()) -> binary().
+normalize_wire_name(Domain) ->
+    normalize_name(from_wire_bytes(Domain)).
 
 strip_trailing_dots(Bin) ->
     Size = byte_size(Bin),
@@ -158,7 +170,7 @@ extract_watched_records(#dns_rec{anlist = An, arlist = Ar, nslist = Ns}) ->
 
 extract_records(RRs) ->
     [
-        {normalize_name(from_wire_bytes(Domain)), Type, from_wire_data(Type, Data), Ttl, CacheFlush}
+        {normalize_wire_name(Domain), Type, from_wire_data(Type, Data), Ttl, CacheFlush}
      || #dns_rr{
             domain = Domain,
             type = Type,
@@ -184,9 +196,9 @@ to_wire_data(srv, {Prio, Weight, Port, Target}) -> {Prio, Weight, Port, to_domai
 to_wire_data(_Type, Data) -> Data.
 
 from_wire_data(ptr, Data) ->
-    normalize_name(from_wire_bytes(Data));
+    normalize_wire_name(Data);
 from_wire_data(srv, {Prio, Weight, Port, Target}) ->
-    {Prio, Weight, Port, normalize_name(from_wire_bytes(Target))};
+    {Prio, Weight, Port, normalize_wire_name(Target)};
 from_wire_data(txt, Data) when is_list(Data) -> [from_wire_bytes(S) || S <- Data];
 from_wire_data(_Type, Data) ->
     Data.
@@ -205,7 +217,16 @@ from_wire_data(_Type, Data) ->
 from_wire_bytes(B) when is_binary(B) -> B;
 from_wire_bytes(L) when is_list(L) -> list_to_binary(L).
 
-to_domain(Name) -> unicode:characters_to_list(Name).
+%% The encode-side mirror of from_wire_bytes/1. A name binary already
+%% holds the exact bytes that belong on the wire (UTF-8 for a
+%% caller-supplied name, whatever was received for one learned from the
+%% network), and inet_dns:encode/2 writes each list element as exactly
+%% one byte - so the bytes are unpacked as-is. UTF-8-decoding them
+%% instead (unicode:characters_to_list/1) would emit Latin-1 for
+%% U+0080..U+00FF, crash encode/2 with function_clause for anything
+%% above U+00FF (in mdns_socket, for a name learned from the network),
+%% and return an error tuple for bytes that aren't valid UTF-8.
+to_domain(Name) when is_binary(Name) -> binary_to_list(Name).
 
 -doc """
 Escape a single DNS label's content per RFC 1035 presentation format:

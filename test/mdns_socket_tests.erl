@@ -7,16 +7,22 @@ socket_test_() ->
         [
             fun refresh_interface_is_a_noop_when_unchanged/0,
             fun probe_subscribe_and_unsubscribe_update_state/0,
-            fun a_dead_probe_watcher_does_not_leak/0
+            fun a_dead_probe_watcher_does_not_leak/0,
+            fun non_latin1_name_does_not_crash_socket/0
         ]
     end}.
 
+%% Started in mdns_sup's order: mdns_socket hands every packet it
+%% receives (including its own, via multicast loopback) to mdns_cache and
+%% mdns_registry, so both must exist once anything is sent.
 start() ->
-    {ok, Pid} = mdns_socket:start_link(),
-    Pid.
+    {ok, CachePid} = mdns_cache:start_link(),
+    {ok, RegistryPid} = mdns_registry:start_link(),
+    {ok, SocketPid} = mdns_socket:start_link(),
+    [CachePid, RegistryPid, SocketPid].
 
-stop(Pid) ->
-    gen_server:stop(Pid).
+stop(Pids) ->
+    [gen_server:stop(Pid) || Pid <- lists:reverse(Pids)].
 
 refresh_interface_is_a_noop_when_unchanged() ->
     %% Nothing about the configured interface has actually changed here,
@@ -55,3 +61,14 @@ a_dead_probe_watcher_does_not_leak() ->
 %% escape hatch (same technique used in mdns_cache_tests).
 probe_watchers_in_state() ->
     element(4, sys:get_state(mdns_socket)).
+
+%% A name containing a character above U+00FF (here U+4E2D, as learned
+%% from the network and later re-queried by mdns_query's refresh sweep)
+%% must be sent, not crash this gen_server in inet_dns:encode/2.
+non_latin1_name_does_not_crash_socket() ->
+    Pid = whereis(mdns_socket),
+    ok = mdns_socket:send_query(<<228, 184, 173, ".local">>, a),
+    ok = mdns_socket:announce(<<228, 184, 173, ".local">>, a, [{{10, 0, 0, 1}, 0}]),
+    %% A call after the casts is answered only once they've been handled.
+    ok = mdns_socket:refresh_interface(),
+    ?assertEqual(Pid, whereis(mdns_socket)).

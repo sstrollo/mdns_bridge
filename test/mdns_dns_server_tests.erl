@@ -45,7 +45,8 @@ supported_types_test_() ->
         [
             fun resolves_ptr_from_cache/0,
             fun resolves_srv_from_cache/0,
-            fun resolves_txt_from_cache/0
+            fun resolves_txt_from_cache/0,
+            fun resolves_non_ascii_name_from_cache/0
         ]
     end}.
 
@@ -97,3 +98,14 @@ resolves_txt_from_cache() ->
     Resp = mdns_dns_server:build_response(Req, hd(Req#dns_rec.qdlist)),
     ?assertEqual(0, (Resp#dns_rec.header)#dns_header.rcode),
     ?assertMatch([#dns_rr{type = txt, data = [~"path=/"]}], Resp#dns_rec.anlist).
+
+%% A non-ASCII name: the cache key is the UTF-8 binary learned from the
+%% wire, and the bridge question arrives as the same raw bytes in list
+%% form - the two must meet, not miss because one side reinterpreted the
+%% bytes as codepoints.
+resolves_non_ascii_name_from_cache() ->
+    ok = mdns_cache:insert_many([{<<"caf", 195, 169, ".local">>, a, {10, 0, 0, 9}, 120, false}]),
+    Req = request([$c, $a, $f, 195, 169, $., $l, $o, $c, $a, $l], a),
+    Resp = mdns_dns_server:build_response(Req, hd(Req#dns_rec.qdlist)),
+    ?assertEqual(0, (Resp#dns_rec.header)#dns_header.rcode),
+    ?assertMatch([#dns_rr{type = a, data = {10, 0, 0, 9}}], Resp#dns_rec.anlist).

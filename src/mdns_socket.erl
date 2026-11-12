@@ -241,7 +241,7 @@ answer_registered_questions(#dns_rec{qdlist = Qd}, State) ->
     ok.
 
 answer_if_registered(#dns_query{domain = Domain, type = Type}, State) ->
-    Name = mdns_proto:normalize_name(Domain),
+    Name = mdns_proto:normalize_wire_name(Domain),
     case mdns_registry:answers_for(Name, Type) of
         [] ->
             ok;

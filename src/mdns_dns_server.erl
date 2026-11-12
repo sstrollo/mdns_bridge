@@ -123,7 +123,7 @@ handle_query(Socket, SrcIp, SrcPort, Packet) ->
 
 -doc "Build the DNS response for query Q of request Req.".
 build_response(Req, #dns_query{domain = Domain, type = Type}) ->
-    Name = mdns_proto:normalize_name(Domain),
+    Name = mdns_proto:normalize_wire_name(Domain),
     case mdns_proto:is_local(Name) andalso lists:member(Type, ?SUPPORTED_TYPES) of
         true ->
             answer_record(Req, Name, Type);

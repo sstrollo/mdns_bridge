@@ -321,3 +321,43 @@ dns_response_multi_question_test() ->
     Resp = mdns_proto:dns_response(Req, [{{10, 0, 0, 1}, 30}], a, true),
     ?assertMatch([#dns_query{domain = "foo.local"}], Resp#dns_rec.qdlist),
     ?assertMatch([#dns_rr{domain = "foo.local", data = {10, 0, 0, 1}}], Resp#dns_rec.anlist).
+
+%% A name binary holds the exact bytes that belong on the wire; encode
+%% must emit them unchanged (UTF-8 stays UTF-8, not Latin-1) and decode
+%% must give back the identical binary.
+non_ascii_name_round_trip_test_() ->
+    [
+        ?_assertEqual(Name, round_trip_query_name(Name))
+     || Name <- [
+            %% "café.local" (é = U+00E9, UTF-8 C3 A9)
+            <<"caf", 195, 169, ".local">>,
+            %% U+4E2D, above U+00FF: used to crash encode/2
+            <<228, 184, 173, ".local">>,
+            %% not valid UTF-8 at all: still just bytes
+            <<16#ff, ".local">>
+        ]
+    ].
+
+round_trip_query_name(Name) ->
+    Bin = inet_dns:encode(mdns_proto:mdns_query(Name, a), true),
+    {ok, #dns_rec{qdlist = [#dns_query{domain = Domain}]}} = inet_dns:decode(Bin, true),
+    mdns_proto:normalize_wire_name(Domain).
+
+%% PTR/SRV targets learned from the network can be any bytes; serving
+%% them over the bridge must encode, not crash with function_clause.
+dns_response_non_utf8_ptr_target_encodes_test() ->
+    Req = request("x.local", ptr),
+    Target = <<16#ff, "svc.local">>,
+    Resp = mdns_proto:dns_response(Req, [{Target, 30}], ptr, true),
+    {ok, Decoded} = inet_dns:decode(inet_dns:encode(Resp, false), false),
+    [#dns_rr{data = Data}] = Decoded#dns_rec.anlist,
+    ?assertEqual(Target, mdns_proto:normalize_wire_name(Data)).
+
+%% Question names arrive as raw wire bytes; normalize_wire_name/1 must
+%% not reinterpret them as codepoints (normalize_name/1 on the same list
+%% would double-encode the UTF-8).
+normalize_wire_name_test() ->
+    ?assertEqual(
+        <<"caf", 195, 169, ".local">>,
+        mdns_proto:normalize_wire_name([$C, $a, $f, 195, 169, $., $l, $o, $c, $a, $l, $.])
+    ).
