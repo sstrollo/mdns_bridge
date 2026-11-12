@@ -332,14 +332,12 @@ handle_info({reannounce_one, Key}, State) ->
     reannounce(Key),
     {noreply, State};
 handle_info(reannounce_all, State) ->
-    ets:foldl(
-        fun({Key, _Entry}, ok) ->
-            reannounce(Key),
-            ok
-        end,
-        ok,
+    Records = ets:foldl(
+        fun({{Name, Type, Data}, #{ttl := Ttl}}, Acc) -> [{Name, Type, Data, Ttl} | Acc] end,
+        [],
         ?TAB
     ),
+    announce_in_batches(Records),
     schedule_reannounce_all(),
     {noreply, State};
 handle_info(_Msg, State) ->
@@ -372,7 +370,13 @@ attempt_register(OriginalName, CandidateName, Ip, Opts, Attempt) ->
                                 Reason,
                                 fun() -> commit(CandidateName, Ip, Opts) end,
                                 fun(NewName, NextAttempt) ->
-                                    attempt_register(OriginalName, NewName, Ip, Opts, NextAttempt)
+                                    attempt_register(
+                                        OriginalName,
+                                        mdns_proto:normalize_name(NewName),
+                                        Ip,
+                                        Opts,
+                                        NextAttempt
+                                    )
                                 end
                             )
                     end
@@ -513,10 +517,15 @@ split_local_suffix(Name) ->
 to_binary(S) when is_binary(S) -> S;
 to_binary(S) when is_list(S) -> unicode:characters_to_binary(S).
 
+%% Hands back exactly what Fun returned (as a binary): a host name is
+%% normalized by its retry path, but a service's plain instance label
+%% must not be - lowercasing/trailing-dot stripping belong to the full
+%% name it's about to be built into, not to the label (which is escaped
+%% first - a label ending in "." is legitimate).
 rename_via(Fun, Name, Attempt) ->
     try Fun(Name, Attempt) of
         NewName when is_list(NewName); is_binary(NewName) ->
-            {ok, mdns_proto:normalize_name(NewName)};
+            {ok, to_binary(NewName)};
         Other ->
             {error, {rename_fun_failed, {invalid_return, Other}}}
     catch
@@ -639,25 +648,17 @@ validate_target_host(Target) ->
         false -> {error, {not_local, Target}}
     end.
 
-is_valid_service_type(ServiceType) ->
-    case split_service_type(ServiceType) of
-        {ok, App, Proto} ->
-            lists:prefix("_", App) andalso
-                length(App) > 1 andalso
-                (Proto =:= "_tcp" orelse Proto =:= "_udp");
-        error ->
+%% "_<app>._tcp" or "_<app>._udp", case-insensitively (service_type_name/1
+%% lowercases it the same way).
+is_valid_service_type(ServiceType) when is_list(ServiceType); is_binary(ServiceType) ->
+    case binary:split(mdns_proto:normalize_name(ServiceType), ~".") of
+        [<<$_, _/binary>> = App, Proto] when byte_size(App) > 1 ->
+            Proto =:= ~"_tcp" orelse Proto =:= ~"_udp";
+        _ ->
             false
-    end.
-
-split_service_type(ServiceType) when is_binary(ServiceType) ->
-    split_service_type(unicode:characters_to_list(ServiceType));
-split_service_type(ServiceType) when is_list(ServiceType) ->
-    case string:split(ServiceType, ".") of
-        [App, Proto] when App =/= [] -> {ok, App, Proto};
-        _ -> error
     end;
-split_service_type(_) ->
-    error.
+is_valid_service_type(_) ->
+    false.
 
 do_register(Name, Ip, Opts, FromPid, State0) ->
     Key = {Name, a, Ip},
@@ -744,12 +745,28 @@ do_withdraw(Ref, State, Notify, KeepKeys) ->
     case maps:take(Ref, State#state.monitors) of
         {Registration, Monitors} ->
             erlang:demonitor(Ref, [flush]),
-            withdraw_registration(
+            NewState = withdraw_registration(
                 Ref, Registration, Notify, KeepKeys, State#state{monitors = Monitors}
-            );
+            ),
+            prune_defenses(registration_keys(Registration), NewState);
         error ->
             State
     end.
+
+registration_keys({host, Key, _Pid}) -> [Key];
+registration_keys({service, Keys, _ServiceType, _Pid}) -> Keys.
+
+%% A defense timestamp is only meaningful while something is still
+%% published under its {Name, Type}; once the last registration there is
+%% gone, drop it rather than let the map grow with every name ever held.
+prune_defenses(Keys, #state{defenses = Defenses} = State) ->
+    Gone = [
+        {Name, Type}
+     || {Name, Type, _Data} <- Keys,
+        maps:is_key({Name, Type}, Defenses),
+        answers_for(Name, Type) =:= []
+    ],
+    State#state{defenses = maps:without(Gone, Defenses)}.
 
 withdraw_registration(Ref, {host, {Name, _Type, _Data} = Key, Pid}, Notify, KeepKeys, State) ->
     maybe_delete_and_goodbye(Key, Ref, KeepKeys),
@@ -788,6 +805,20 @@ reannounce({Name, Type, Data} = Key) ->
         [{Key, #{ttl := Ttl}}] -> mdns_socket:announce(Name, Type, [{Data, Ttl}]);
         [] -> ok
     end.
+
+%% Records per re-announcement packet - see mdns_query's
+%% ?QUESTIONS_PER_PACKET for the same reasoning; records are bigger than
+%% questions (a TXT can be several hundred bytes), hence fewer.
+-define(RECORDS_PER_PACKET, 10).
+
+announce_in_batches([]) ->
+    ok;
+announce_in_batches(Records) when length(Records) > ?RECORDS_PER_PACKET ->
+    {Batch, Rest} = lists:split(?RECORDS_PER_PACKET, Records),
+    mdns_socket:announce_records(Batch),
+    announce_in_batches(Rest);
+announce_in_batches(Records) ->
+    mdns_socket:announce_records(Records).
 
 schedule_reannounce_all() ->
     Interval = application:get_env(

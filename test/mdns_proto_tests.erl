@@ -235,6 +235,17 @@ round_trip_mdns_query_test() ->
     {ok, Decoded} = inet_dns:decode(Bin, true),
     ?assertMatch(#dns_rec{qdlist = [#dns_query{domain = "widget.local", type = a}]}, Decoded).
 
+%% One packet, several questions (what the refresh sweep sends).
+round_trip_multi_question_query_test() ->
+    Rec = mdns_proto:mdns_query([
+        {~"widget.local", a}, {~"_http._tcp.local", ptr}, {~"gadget.local", srv}
+    ]),
+    {ok, Decoded} = inet_dns:decode(inet_dns:encode(Rec, true), true),
+    ?assertEqual(
+        [{"widget.local", a}, {"_http._tcp.local", ptr}, {"gadget.local", srv}],
+        [{D, T} || #dns_query{domain = D, type = T} <- Decoded#dns_rec.qdlist]
+    ).
+
 round_trip_dns_response_test() ->
     Req = request("widget.local", a),
     Resp = mdns_proto:dns_response(Req, [{{10, 0, 0, 1}, 30}], a, true),

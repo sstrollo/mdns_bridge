@@ -25,6 +25,7 @@ back to this app's binary form.
     validate_name/1,
     validate_txt_data/1,
     is_local/1,
+    mdns_query/1,
     mdns_query/2,
     mdns_answer/3,
     mdns_response/2,
@@ -151,22 +152,32 @@ ends_with(Bin, Suffix) ->
     byte_size(Bin) >= SuffixSize andalso
         binary:part(Bin, byte_size(Bin) - SuffixSize, SuffixSize) =:= Suffix.
 
--doc """
-Build an mDNS question packet (as a `#dns_rec{}`) asking for Type
-records of Name. A plain (non-QU) question: we want the multicast
-answer, and it's fine (and useful) if others on the link overhear it
-too.
-""".
+-doc "Equivalent to `mdns_query([{Name, Type}])`.".
 -spec mdns_query(binary(), atom()) -> #dns_rec{}.
 mdns_query(Name, Type) ->
+    mdns_query([{Name, Type}]).
+
+-doc """
+Build an mDNS query packet (as a `#dns_rec{}`) with one question per
+`{Name, Type}` - RFC 6762 allows any number of questions in one query,
+which is how `mdns_query`'s refresh sweep re-queries many expiring
+records in a few packets rather than one each. Plain (non-QU)
+questions: we want the multicast answer, and it's fine (and useful) if
+others on the link overhear it too.
+""".
+-spec mdns_query([{binary(), atom()}]) -> #dns_rec{}.
+mdns_query(Questions) ->
     Header = #dns_header{id = 0, qr = 0, opcode = 0, rd = 0},
-    Query = #dns_query{
-        domain = to_domain(Name),
-        type = Type,
-        class = ?CLASS_IN,
-        unicast_response = false
-    },
-    #dns_rec{header = Header, qdlist = [Query], anlist = [], nslist = [], arlist = []}.
+    Qd = [
+        #dns_query{
+            domain = to_domain(Name),
+            type = Type,
+            class = ?CLASS_IN,
+            unicast_response = false
+        }
+     || {Name, Type} <- Questions
+    ],
+    #dns_rec{header = Header, qdlist = Qd, anlist = [], nslist = [], arlist = []}.
 
 -doc """
 Build an unsolicited mDNS answer/announcement (as a `#dns_rec{}`) for a

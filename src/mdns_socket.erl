@@ -40,7 +40,9 @@ through the gen_server.
     child_spec/0,
     start_link/0,
     send_query/2,
+    send_queries/1,
     announce/3,
+    announce_records/1,
     send_probe/4,
     probe_subscribe/2,
     probe_unsubscribe/2,
@@ -90,7 +92,12 @@ start_link() ->
 -doc "Multicast an mDNS query for Type records of Name.".
 -spec send_query(binary(), atom()) -> ok.
 send_query(Name, Type) ->
-    gen_server:cast(?SERVER, {send_query, Name, Type}).
+    send_queries([{Name, Type}]).
+
+-doc "Multicast one mDNS query packet carrying a question per `{Name, Type}`.".
+-spec send_queries([{binary(), atom()}]) -> ok.
+send_queries(Questions) ->
+    gen_server:cast(?SERVER, {send_queries, Questions}).
 
 -doc """
 Multicast an mDNS answer for Name/Type: an announce, a reactive
@@ -98,7 +105,17 @@ response, or (with a Ttl of 0 in Answers) a goodbye.
 """.
 -spec announce(binary(), atom(), [{term(), non_neg_integer()}]) -> ok.
 announce(Name, Type, Answers) ->
-    gen_server:cast(?SERVER, {announce, Name, Type, Answers}).
+    announce_records([{Name, Type, Data, Ttl} || {Data, Ttl} <- Answers]).
+
+-doc """
+Multicast one announcement packet carrying every record in Records
+(any mix of names and types) - `mdns_registry`'s periodic
+re-announcement of everything it holds, in a few packets rather than
+one per record.
+""".
+-spec announce_records([mdns_proto:record()]) -> ok.
+announce_records(Records) ->
+    gen_server:cast(?SERVER, {announce_records, Records}).
 
 -doc "Multicast an RFC 6762 8.1 probe for Name/Type/Data.".
 -spec send_probe(binary(), atom(), term(), non_neg_integer()) -> ok.
@@ -230,14 +247,12 @@ handle_call(sync, _From, State) ->
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
-handle_cast({send_query, Name, Type}, State) ->
-    Rec = mdns_proto:mdns_query(Name, Type),
-    do_send(Rec, State),
+handle_cast({send_queries, Questions}, State) ->
+    do_send(mdns_proto:mdns_query(Questions), State),
     {noreply, State};
-handle_cast({announce, Name, Type, Answers}, State) ->
-    Rec = mdns_proto:mdns_answer(Name, Type, Answers),
-    do_send(Rec, State),
-    {noreply, note_multicast([{Name, Type}], State)};
+handle_cast({announce_records, Records}, State) ->
+    do_send(mdns_proto:mdns_response(Records, []), State),
+    {noreply, note_multicast([{Name, Type} || {Name, Type, _, _} <- Records], State)};
 handle_cast({send_probe, Name, Type, Data, Ttl}, State) ->
     Rec = mdns_proto:probe_query(Name, Type, Data, Ttl),
     do_send(Rec, State),

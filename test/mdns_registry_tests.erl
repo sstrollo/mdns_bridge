@@ -31,6 +31,7 @@ registry_test_() ->
             fun withdraw_all_withdraws_every_registration/0,
             fun ongoing_conflict_is_defended_once_then_given_up/0,
             fun ongoing_conflict_is_ignored_for_our_own_sibling_data/0,
+            fun defense_state_is_dropped_with_the_last_registration/0,
             fun force_on_conflict_never_gives_up_ongoing_defense/0
         ]
     end}.
@@ -166,7 +167,18 @@ rejects_bad_service_type() ->
     ?assertMatch(
         {error, {invalid_service_type, _}},
         mdns_registry:register_service("X", "_http._sctp", 80, [], service_local_target(7))
-    ).
+    ),
+    ?assertMatch(
+        {error, {invalid_service_type, _}},
+        mdns_registry:register_service("X", "_._tcp", 80, [], service_local_target(7))
+    ),
+    %% DNS names are case-insensitive: the type check must agree with
+    %% service_type_name/1, which lowercases.
+    {ok, Ref, Name} = mdns_registry:register_service(
+        "X", ~"_HTTP._TCP", 80, [], service_local_target(7), #{probe => false}
+    ),
+    ?assertEqual(~"x._http._tcp.local", Name),
+    ok = mdns_registry:unregister(Ref).
 
 rejects_bad_port() ->
     ?assertMatch(
@@ -539,6 +551,26 @@ ongoing_conflict_is_ignored_for_our_own_sibling_data() ->
     ?assertEqual(2, length(mdns_registry:answers_for(~"test-roundrobin.local", a))),
     ok = mdns_registry:unregister(Ref1),
     ok = mdns_registry:unregister(Ref2).
+
+%% A defense timestamp only means something while the name is held; it
+%% must not accumulate in state for every name ever defended and then
+%% unregistered - but must survive while a sibling still holds the name.
+defense_state_is_dropped_with_the_last_registration() ->
+    Ip1 = sibling_ip(36),
+    Ip2 = sibling_ip(37),
+    Other = sibling_ip(38),
+    {ok, Ref1, _} = mdns_registry:register("test-defense-prune.local", Ip1, #{probe => false}),
+    {ok, Ref2, _} = mdns_registry:register("test-defense-prune.local", Ip2, #{probe => false}),
+    ok = mdns_registry:notify_conflict(~"test-defense-prune.local", a, Other),
+    sync(),
+    ?assert(maps:is_key({~"test-defense-prune.local", a}, defenses_in_state())),
+    ok = mdns_registry:unregister(Ref1),
+    ?assert(maps:is_key({~"test-defense-prune.local", a}, defenses_in_state())),
+    ok = mdns_registry:unregister(Ref2),
+    ?assertNot(maps:is_key({~"test-defense-prune.local", a}, defenses_in_state())).
+
+defenses_in_state() ->
+    element(5, sys:get_state(mdns_registry)).
 
 force_on_conflict_never_gives_up_ongoing_defense() ->
     Ip = sibling_ip(16),

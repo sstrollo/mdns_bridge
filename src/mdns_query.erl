@@ -16,6 +16,11 @@ someone last overheard them.
 -define(SERVER, ?MODULE).
 -define(REFRESH_INTERVAL_MS, 15000).
 -define(REFRESH_BEFORE_SECONDS, 20).
+%% Questions per refresh packet: RFC 6762 allows many per query, and a
+%% question is well under 300 bytes, so this keeps each packet
+%% comfortably inside a normal MTU while turning a sweep over a busy
+%% cache into a handful of packets instead of one per record.
+-define(QUESTIONS_PER_PACKET, 20).
 
 -record(state, {}).
 
@@ -71,12 +76,20 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info(refresh_sweep, State) ->
-    Keys = mdns_cache:near_expiry(?REFRESH_BEFORE_SECONDS),
-    [mdns_socket:send_query(Name, Type) || {Name, Type} <- Keys],
+    send_in_batches(mdns_cache:near_expiry(?REFRESH_BEFORE_SECONDS)),
     schedule_sweep(),
     {noreply, State};
 handle_info(_Msg, State) ->
     {noreply, State}.
+
+send_in_batches([]) ->
+    ok;
+send_in_batches(Keys) when length(Keys) > ?QUESTIONS_PER_PACKET ->
+    {Batch, Rest} = lists:split(?QUESTIONS_PER_PACKET, Keys),
+    mdns_socket:send_queries(Batch),
+    send_in_batches(Rest);
+send_in_batches(Keys) ->
+    mdns_socket:send_queries(Keys).
 
 schedule_sweep() ->
     erlang:send_after(?REFRESH_INTERVAL_MS, self(), refresh_sweep).
