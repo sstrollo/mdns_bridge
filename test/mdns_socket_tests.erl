@@ -8,7 +8,8 @@ socket_test_() ->
             fun refresh_interface_is_a_noop_when_unchanged/0,
             fun probe_subscribe_and_unsubscribe_update_state/0,
             fun a_dead_probe_watcher_does_not_leak/0,
-            fun non_latin1_name_does_not_crash_socket/0
+            fun non_latin1_name_does_not_crash_socket/0,
+            fun malformed_inbound_packet_does_not_crash_socket/0
         ]
     end}.
 
@@ -72,3 +73,21 @@ non_latin1_name_does_not_crash_socket() ->
     %% A call after the casts is answered only once they've been handled.
     ok = mdns_socket:refresh_interface(),
     ?assertEqual(Pid, whereis(mdns_socket)).
+
+%% inet_dns:decode/2 raises (rather than returning {error, _}) on some
+%% malformed input - this 4-byte datagram is one such case. Sent to the
+%% multicast group (so it reaches our socket regardless of any other
+%% mDNS responder sharing port 5353 on this host), it must be dropped,
+%% not take the gen_server down.
+malformed_inbound_packet_does_not_crash_socket() ->
+    Pid = whereis(mdns_socket),
+    {ok, {IfaceIp, _Netmask}} = mdns_iface:resolve_with_netmask(undefined),
+    {ok, S} = gen_udp:open(0, [binary, {multicast_if, IfaceIp}, {multicast_loop, true}]),
+    ok = gen_udp:send(S, {224, 0, 0, 251}, 5353, <<0, 0, 132, 0>>),
+    ok = gen_udp:send(S, {224, 0, 0, 251}, 5353, <<>>),
+    ok = gen_udp:send(S, {224, 0, 0, 251}, 5353, <<16#FF, 16#FF, 16#FF, 16#FF, 16#FF>>),
+    gen_udp:close(S),
+    timer:sleep(100),
+    ?assertEqual(Pid, whereis(mdns_socket)),
+    %% ...and it's still processing packets afterwards.
+    ok = mdns_socket:refresh_interface().

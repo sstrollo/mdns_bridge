@@ -185,7 +185,30 @@ handle_cast({send_probe, Name, Type, Data, Ttl}, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({udp, Socket, _SrcIp, _SrcPort, Packet}, #state{socket = Socket} = State) ->
+handle_info({udp, Socket, SrcIp, SrcPort, Packet}, #state{socket = Socket} = State) ->
+    %% Nothing that arrives on this socket may take the process down:
+    %% anyone on the segment can send anything, and inet_dns:decode/2
+    %% only turns *some* malformed input into {error, _} - a crafted
+    %% datagram can make it raise instead. The whole per-packet path is
+    %% guarded, not just decode, since the same holds for whatever a
+    %% decoded-but-nonsensical packet can trip further down.
+    try
+        handle_packet(SrcIp, SrcPort, Packet, State)
+    catch
+        Class:Reason ->
+            logger:debug("mdns_socket: dropped packet from ~0p:~b: ~0p", [
+                SrcIp, SrcPort, {Class, Reason}
+            ])
+    end,
+    {noreply, State};
+handle_info({'DOWN', Ref, process, Pid, _Reason}, State) ->
+    {noreply, State#state{probe_watchers = drop_watcher(Pid, Ref, State#state.probe_watchers)}};
+handle_info(_Msg, State) ->
+    {noreply, State}.
+
+%% -- internal -----------------------------------------------------------
+
+handle_packet(_SrcIp, _SrcPort, Packet, State) ->
     case inet_dns:decode(Packet, true) of
         {ok, DnsRec} ->
             case mdns_proto:extract_answers(DnsRec) of
@@ -199,14 +222,7 @@ handle_info({udp, Socket, _SrcIp, _SrcPort, Packet}, #state{socket = Socket} = S
             answer_registered_questions(DnsRec, State);
         {error, _Reason} ->
             ok
-    end,
-    {noreply, State};
-handle_info({'DOWN', Ref, process, Pid, _Reason}, State) ->
-    {noreply, State#state{probe_watchers = drop_watcher(Pid, Ref, State#state.probe_watchers)}};
-handle_info(_Msg, State) ->
-    {noreply, State}.
-
-%% -- internal -----------------------------------------------------------
+    end.
 
 %% RFC 6762 section 9 (ongoing conflict defense): flag any answer for a
 %% name/type we currently publish whose data isn't one of our own current
