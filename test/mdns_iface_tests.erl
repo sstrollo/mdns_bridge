@@ -21,3 +21,20 @@ same_subnet_test_() ->
             mdns_iface:same_subnet({172, 16, 200, 5}, {172, 16, 0, 1}, {255, 255, 0, 0})
         )
     ].
+
+is_link_local_test_() ->
+    Iface = {192, 168, 1, 1},
+    Mask = {255, 255, 255, 0},
+    [
+        ?_assert(mdns_iface:is_link_local({192, 168, 1, 42}, Iface, Mask)),
+        ?_assert(mdns_iface:is_link_local(Iface, Iface, Mask)),
+        ?_assertNot(mdns_iface:is_link_local({192, 168, 2, 42}, Iface, Mask)),
+        ?_assertNot(mdns_iface:is_link_local({203, 0, 113, 9}, Iface, Mask)),
+        ?_assertNot(mdns_iface:is_link_local({127, 0, 0, 1}, Iface, Mask)),
+        %% IPv4 link-local sources are on the link by definition.
+        ?_assert(mdns_iface:is_link_local({169, 254, 7, 7}, Iface, Mask)),
+        %% A /32 can't tell us anything - accept.
+        ?_assert(mdns_iface:is_link_local({203, 0, 113, 9}, {10, 0, 0, 5}, {255, 255, 255, 255})),
+        %% Not an IPv4 address at all.
+        ?_assertNot(mdns_iface:is_link_local({0, 0, 0, 0, 0, 0, 0, 1}, Iface, Mask))
+    ].

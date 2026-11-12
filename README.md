@@ -449,6 +449,12 @@ Security considerations
   `cache_max_entries` rather than unbounded. Don't feed the classic-DNS
   bridge's answers for names you don't control into anything that makes
   security-sensitive decisions without independent verification.
+- **Only the local link is listened to.** Inbound mDNS is dropped unless
+  its source address is on the configured interface's subnet (or is
+  169.254/16), and a *response* is ignored unless it came from port 5353
+  (RFC 6762 sections 11 and 6) - so a host that isn't on the link can't
+  unicast records into the cache. If the interface has a /32 netmask,
+  the subnet check can't tell anything and every source is accepted.
 - **The classic-DNS bridge answers whoever can reach it.** `dns_bind_ip`
   defaults to `{0,0,0,0}` (all interfaces, not just localhost). Bind it
   to `127.0.0.1` or a trusted interface if it shouldn't be reachable

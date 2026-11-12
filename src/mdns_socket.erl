@@ -2,12 +2,23 @@
 
 -moduledoc """
 Owns the mDNS multicast UDP socket (224.0.0.251:5353). Decodes
-inbound packets: feeds any answer records into `mdns_cache`, flags any
+inbound packets: feeds answer records into `mdns_cache`, flags any
 answer that conflicts with something `mdns_registry` has published
 (ongoing conflict defense, RFC 6762 section 9), answers any question
 that matches something `mdns_registry` has published, and notifies any
 probe watchers (`mdns_registry`'s RFC 6762 section 8 probing) of
 matching answers or competing simultaneous probes.
+
+Only packets from the local link are looked at (RFC 6762 section 11:
+the source must be on the configured interface's subnet, or
+169.254/16), and a response is only believed if it came from port
+5353 (section 6) - the two checks that stop a host that isn't on the
+link from unicasting records into the cache. Records that merely
+appear inside a *query* (a known-answer list, a probe's proposal) are
+never cached, and neither are this app's own registered records as
+they loop back through the group - those are answered from the
+registry. The socket runs in `{active, N}` mode so a flood can't grow
+this process's mailbox without bound.
 
 Exposes `send_query/2` (`mdns_query`'s active querying), `announce/3`
 (`mdns_registry`'s announcements, reactive answers, and goodbyes),
@@ -23,6 +34,7 @@ through the gen_server.
 -behaviour(gen_server).
 
 -include("mdns_dns.hrl").
+-include("mdns_trace.hrl").
 
 -export([
     child_spec/0,
@@ -40,15 +52,20 @@ through the gen_server.
 -define(SERVER, ?MODULE).
 -define(MDNS_GROUP, {224, 0, 0, 251}).
 -define(MDNS_PORT, 5353).
+%% {active, N}: how many datagrams the socket may deliver before it
+%% pauses until this process asks for more - bounds the mailbox under a
+%% flood, at the cost of one setopts call per N packets.
+-define(ACTIVE_N, 100).
 
 %% {Pid, monitor ref watching it} per subscriber of a {Name, Type} -
 %% the ref lets a subscriber be found and demonitored again by
 %% probe_unsubscribe/2, or dropped on its own on a 'DOWN'.
--type probe_watchers() :: #{{string(), atom()} => [{pid(), reference()}]}.
+-type probe_watchers() :: #{{binary(), atom()} => [{pid(), reference()}]}.
 
 -record(state, {
     socket :: gen_udp:socket(),
     iface_ip :: inet:ip4_address(),
+    netmask :: inet:ip4_address(),
     probe_watchers = #{} :: probe_watchers()
 }).
 
@@ -115,15 +132,15 @@ sync() ->
 
 init([]) ->
     IfaceConfig = application:get_env(mdns_bridge, interface, undefined),
-    case mdns_iface:resolve(IfaceConfig) of
-        {ok, IfaceIp} ->
+    case mdns_iface:resolve_with_netmask(IfaceConfig) of
+        {ok, {IfaceIp, Netmask}} ->
             case open_socket(IfaceIp) of
                 {ok, Socket} ->
                     logger:info(
                         "mdns_socket: joined ~0p on interface ~0p",
                         [?MDNS_GROUP, IfaceIp]
                     ),
-                    {ok, #state{socket = Socket, iface_ip = IfaceIp}};
+                    {ok, #state{socket = Socket, iface_ip = IfaceIp, netmask = Netmask}};
                 {error, Reason} ->
                     {stop, {socket_open_failed, Reason}}
             end;
@@ -134,7 +151,7 @@ init([]) ->
 open_socket(IfaceIp) ->
     Opts = [
         binary,
-        {active, true},
+        {active, ?ACTIVE_N},
         {reuseaddr, true},
         %% Without this, binding 5353 fails with eaddrinuse on any host
         %% that already runs its own mDNS responder on the same port -
@@ -153,8 +170,8 @@ open_socket(IfaceIp) ->
 
 handle_call(refresh_interface, _From, #state{socket = Socket, iface_ip = OldIp} = State) ->
     IfaceConfig = application:get_env(mdns_bridge, interface, undefined),
-    case mdns_iface:resolve(IfaceConfig) of
-        {ok, NewIp} when NewIp =/= OldIp ->
+    case mdns_iface:resolve_with_netmask(IfaceConfig) of
+        {ok, {NewIp, Netmask}} when NewIp =/= OldIp ->
             %% Leaving the group on the old address is best-effort: by
             %% the time the embedder calls this, that address has usually
             %% already gone away (which is why it's calling), and
@@ -173,15 +190,15 @@ handle_call(refresh_interface, _From, #state{socket = Socket, iface_ip = OldIp} 
             of
                 ok ->
                     logger:info("mdns_socket: interface changed ~0p -> ~0p", [OldIp, NewIp]),
-                    {reply, ok, State#state{iface_ip = NewIp}};
+                    {reply, ok, State#state{iface_ip = NewIp, netmask = Netmask}};
                 {error, JoinReason} ->
                     logger:warning("mdns_socket: could not join group on ~0p: ~0p", [
                         NewIp, JoinReason
                     ]),
                     {reply, {error, {join_failed, NewIp, JoinReason}}, State}
             end;
-        {ok, _UnchangedIp} ->
-            {reply, ok, State};
+        {ok, {_UnchangedIp, Netmask}} ->
+            {reply, ok, State#state{netmask = Netmask}};
         {error, Reason} ->
             {reply, {error, Reason}, State}
     end;
@@ -232,6 +249,9 @@ handle_info({udp, Socket, SrcIp, SrcPort, Packet}, #state{socket = Socket} = Sta
             ])
     end,
     {noreply, State};
+handle_info({udp_passive, Socket}, #state{socket = Socket} = State) ->
+    ok = inet:setopts(Socket, [{active, ?ACTIVE_N}]),
+    {noreply, State};
 handle_info({'DOWN', Ref, process, Pid, _Reason}, State) ->
     {noreply, State#state{probe_watchers = drop_watcher(Pid, Ref, State#state.probe_watchers)}};
 handle_info(_Msg, State) ->
@@ -239,29 +259,70 @@ handle_info(_Msg, State) ->
 
 %% -- internal -----------------------------------------------------------
 
-handle_packet(_SrcIp, _SrcPort, Packet, State) ->
-    case inet_dns:decode(Packet, true) of
-        {ok, DnsRec} ->
-            case mdns_proto:extract_answers(DnsRec) of
-                [] ->
-                    ok;
-                Entries ->
-                    mdns_cache:insert_many(Entries),
-                    check_conflicts(Entries)
-            end,
-            notify_probe_watchers(mdns_proto:extract_watched_records(DnsRec), State),
-            answer_registered_questions(DnsRec, State);
-        {error, _Reason} ->
-            ok
+%% RFC 6762 section 11: only packets from the local link are considered
+%% at all. Anything else is an off-link host unicasting at port 5353 -
+%% the one way such a host could get records into the cache or trip
+%% conflict handling.
+handle_packet(SrcIp, SrcPort, Packet, #state{iface_ip = IfaceIp, netmask = Netmask} = State) ->
+    case mdns_iface:is_link_local(SrcIp, IfaceIp, Netmask) of
+        true ->
+            case inet_dns:decode(Packet, true) of
+                {ok, DnsRec} -> handle_decoded(DnsRec, SrcIp, SrcPort, State);
+                {error, _Reason} -> ok
+            end;
+        false ->
+            ?TRACE(dropped_off_link, #{src => SrcIp, port => SrcPort})
     end.
 
-%% RFC 6762 section 9 (ongoing conflict defense): flag any answer for a
-%% name/type we currently publish whose data isn't one of our own current
-%% values for it - i.e. some other, unrelated host is answering for a
-%% name we own. (An answer that just repeats one of our own registered
-%% values - e.g. a legitimate second registration under the same name,
-%% for round-robin - is not a conflict.)
-%%
+%% A response is only believed if it came from port 5353 (RFC 6762
+%% section 6: responses from any other source port MUST be ignored - they
+%% can't be from an mDNS responder). A query's own records are never
+%% cached: its answer section is the querier's known-answer list (7.1),
+%% its authority section a prober's tentative proposal (8.1) - neither is
+%% an assertion by the record's owner, though both are what a prober
+%% watching for competition needs to see.
+handle_decoded(#dns_rec{header = #dns_header{qr = IsResponse}} = DnsRec, SrcIp, SrcPort, State) ->
+    case {IsResponse, SrcPort} of
+        {true, ?MDNS_PORT} ->
+            Entries = mdns_proto:extract_answers(DnsRec),
+            notify_probe_watchers(Entries, State),
+            case foreign_entries(Entries) of
+                [] -> ok;
+                Foreign -> mdns_cache:insert_many(Foreign)
+            end;
+        {true, _OtherPort} ->
+            ?TRACE(dropped_response_port, #{src => SrcIp, port => SrcPort});
+        {false, _} ->
+            notify_probe_watchers(mdns_proto:extract_watched_records(DnsRec), State),
+            answer_registered_questions(DnsRec, State)
+    end.
+
+%% Everything in Entries except our own registered records. Those loop
+%% back through the multicast group like anyone else's, but they're
+%% answered from the registry, never the cache - and cached, they'd have
+%% mdns_query's refresh sweep re-querying our own names. The one registry
+%% lookup this takes per record also serves RFC 6762 section 9 (ongoing
+%% conflict defense): a record for a name/type we publish whose data
+%% isn't one of our own current values is some other host answering for
+%% our name. (One that repeats one of our values - e.g. a legitimate
+%% second registration under the same name, for round-robin - is ours.)
+foreign_entries(Entries) ->
+    [Entry || Entry <- Entries, not is_ours(Entry)].
+
+is_ours({Name, Type, Data, Ttl, _CacheFlush}) ->
+    case mdns_registry:answers_for(Name, Type) of
+        [] ->
+            false;
+        Ours ->
+            case lists:keymember(Data, 1, Ours) of
+                true ->
+                    true;
+                false ->
+                    maybe_notify_conflict(Name, Type, Data, Ttl),
+                    false
+            end
+    end.
+
 %% PTR is excluded: it's RFC 6763's "shared" record type (both the
 %% per-service-type enumeration PTR and the meta-enumeration PTR), where
 %% many different, simultaneously valid owners contributing different
@@ -274,24 +335,12 @@ handle_packet(_SrcIp, _SrcPort, Packet, State) ->
 %% current values, so its goodbye would otherwise read as a competing
 %% claim - and two of those within the defense grace window would make
 %% mdns_registry give up the surviving registration.
-check_conflicts(Entries) ->
-    [maybe_notify_conflict(Entry) || Entry <- Entries],
-    ok.
-
-maybe_notify_conflict({_Name, ptr, _Data, _Ttl, _CacheFlush}) ->
+maybe_notify_conflict(_Name, ptr, _Data, _Ttl) ->
     ok;
-maybe_notify_conflict({_Name, _Type, _Data, 0, _CacheFlush}) ->
+maybe_notify_conflict(_Name, _Type, _Data, 0) ->
     ok;
-maybe_notify_conflict({Name, Type, Data, _Ttl, _CacheFlush}) ->
-    case mdns_registry:answers_for(Name, Type) of
-        [] ->
-            ok;
-        Ours ->
-            case lists:keymember(Data, 1, Ours) of
-                true -> ok;
-                false -> mdns_registry:notify_conflict(Name, Type, Data)
-            end
-    end.
+maybe_notify_conflict(Name, Type, Data, _Ttl) ->
+    mdns_registry:notify_conflict(Name, Type, Data).
 
 answer_registered_questions(#dns_rec{qdlist = Qd}, State) ->
     [answer_if_registered(Q, State) || Q <- Qd],

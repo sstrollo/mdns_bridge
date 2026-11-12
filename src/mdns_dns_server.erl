@@ -42,6 +42,9 @@ the process table beyond that budget.
 -define(DEFAULT_QUERY_TIMEOUT_MS, 400).
 -define(DEFAULT_RATE_LIMIT_PER_SECOND, 1000).
 -define(RATE_WINDOW_MS, 1000).
+%% {active, N}: bounds this process's mailbox under a flood - see
+%% mdns_socket, which does the same.
+-define(ACTIVE_N, 100).
 %% Record types this bridge actually understands and will actively
 %% resolve on a cache miss. Anything else (including AAAA - IPv6 isn't
 %% supported yet) falls through to the generic empty-NOERROR path below.
@@ -65,7 +68,7 @@ init([]) ->
     RateLimit = application:get_env(
         mdns_bridge, dns_rate_limit_per_second, ?DEFAULT_RATE_LIMIT_PER_SECOND
     ),
-    Opts = [binary, {active, true}, {reuseaddr, true}, {ip, BindIp}],
+    Opts = [binary, {active, ?ACTIVE_N}, {reuseaddr, true}, {ip, BindIp}],
     case gen_udp:open(Port, Opts) of
         {ok, Socket} ->
             logger:info("mdns_dns_server: listening on ~0p:~b", [BindIp, Port]),
@@ -94,6 +97,9 @@ handle_info(
             %% UDP packet - the caller's own retry/timeout handles it.
             {noreply, State}
     end;
+handle_info({udp_passive, Socket}, #state{socket = Socket} = State) ->
+    ok = inet:setopts(Socket, [{active, ?ACTIVE_N}]),
+    {noreply, State};
 handle_info(reset_rate_counter, State) ->
     schedule_rate_reset(),
     {noreply, State#state{count = 0}};

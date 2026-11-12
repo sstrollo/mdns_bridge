@@ -1,6 +1,7 @@
 -module(mdns_socket_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include("mdns_dns.hrl").
 
 socket_test_() ->
     {setup, fun start/0, fun stop/1, fun(_) ->
@@ -12,7 +13,10 @@ socket_test_() ->
             fun non_latin1_name_does_not_crash_socket/0,
             fun malformed_inbound_packet_does_not_crash_socket/0,
             fun our_own_goodbyes_are_not_conflicts/0,
-            fun withdraw_all_goodbyes_reach_the_wire/0
+            fun withdraw_all_goodbyes_reach_the_wire/0,
+            fun responses_are_only_believed_from_port_5353/0,
+            fun records_inside_a_query_are_not_cached/0,
+            fun our_own_records_are_not_cached/0
         ]
     end}.
 
@@ -95,6 +99,63 @@ withdraw_all_goodbyes_reach_the_wire() ->
     ?assert(saw_goodbye(Listener, binary_to_list(Name), 1000)),
     gen_udp:close(Listener).
 
+%% RFC 6762 section 6: a response from any source port other than 5353
+%% must be ignored. Both packets below are identical and both reach our
+%% socket via the group; only the one from port 5353 may land in the
+%% cache.
+responses_are_only_believed_from_port_5353() ->
+    multicast_from(ephemeral, answer_packet(~"port-check-eph.local", {10, 9, 9, 11})),
+    multicast_from(5353, answer_packet(~"port-check-5353.local", {10, 9, 9, 12})),
+    timer:sleep(150),
+    ?assertEqual([], mdns_cache:lookup(~"port-check-eph.local", a)),
+    ?assertMatch([{{10, 9, 9, 12}, _}], mdns_cache:lookup(~"port-check-5353.local", a)).
+
+%% A query's answer section is the querier's known-answer list (RFC 6762
+%% 7.1), not an assertion by the record's owner - it must not be cached
+%% even from port 5353.
+records_inside_a_query_are_not_cached() ->
+    Name = ~"known-answer.local",
+    #dns_rec{anlist = An} = mdns_proto:mdns_answer(Name, a, [{{10, 9, 9, 14}, 120}]),
+    Query = (mdns_proto:mdns_query(Name, a))#dns_rec{anlist = An},
+    multicast_from(5353, inet_dns:encode(Query, true)),
+    timer:sleep(150),
+    ?assertEqual([], mdns_cache:lookup(Name, a)).
+
+%% Our own announcements loop back through the group like anyone else's
+%% answers; they're answered from the registry and must not also end up
+%% in the cache (where mdns_query's refresh sweep would re-query them).
+our_own_records_are_not_cached() ->
+    {ok, Ref, Name} = mdns:register("own-not-cached.local", {10, 9, 9, 13}, #{
+        probe => false, validate => false
+    }),
+    ok = mdns_socket:sync(),
+    timer:sleep(150),
+    ?assertEqual([], mdns_cache:lookup(Name, a)),
+    ?assertMatch([{{10, 9, 9, 13}, _}], mdns_registry:answers_for(Name, a)),
+    ok = mdns:unregister(Ref).
+
+answer_packet(Name, Ip) ->
+    inet_dns:encode(mdns_proto:mdns_answer(Name, a, [{Ip, 120}]), true).
+
+%% Sends Packet to the group from a socket bound to Port (`ephemeral`
+%% for any free one), looped back so our own socket receives it.
+multicast_from(PortSpec, Packet) ->
+    {ok, {IfaceIp, _Netmask}} = mdns_iface:resolve_with_netmask(undefined),
+    Port =
+        case PortSpec of
+            ephemeral -> 0;
+            P -> P
+        end,
+    {ok, S} = gen_udp:open(Port, [
+        binary,
+        {reuseaddr, true},
+        {ip, {0, 0, 0, 0}},
+        {multicast_if, IfaceIp},
+        {multicast_loop, true}
+    ]),
+    ok = gen_udp:send(S, {224, 0, 0, 251}, 5353, Packet),
+    gen_udp:close(S).
+
 open_group_listener() ->
     {ok, {IfaceIp, _Netmask}} = mdns_iface:resolve_with_netmask(undefined),
     {ok, S} = gen_udp:open(5353, [
@@ -131,7 +192,7 @@ saw_goodbye_until(S, Domain, Deadline) ->
 %% shared via a header - sys:get_state/1 is a standard debug/testing
 %% escape hatch (same technique used in mdns_cache_tests).
 probe_watchers_in_state() ->
-    element(4, sys:get_state(mdns_socket)).
+    element(5, sys:get_state(mdns_socket)).
 
 %% A name containing a character above U+00FF (here U+4E2D, as learned
 %% from the network and later re-queried by mdns_query's refresh sweep)

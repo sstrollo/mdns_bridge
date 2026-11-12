@@ -7,7 +7,7 @@ and to that interface's netmask (used by `mdns_registry` to
 sanity-check addresses it's asked to publish).
 """.
 
--export([resolve/1, resolve_with_netmask/1, same_subnet/3]).
+-export([resolve/1, resolve_with_netmask/1, same_subnet/3, is_link_local/3]).
 
 -type config() :: undefined | string() | binary() | inet:ip4_address().
 
@@ -51,6 +51,21 @@ same_subnet({A1, B1, C1, D1}, {A2, B2, C2, D2}, {M1, M2, M3, M4}) ->
         (B1 band M2) =:= (B2 band M2) andalso
         (C1 band M3) =:= (C2 band M3) andalso
         (D1 band M4) =:= (D2 band M4).
+
+-doc """
+Whether a packet from SrcIp may be taken as coming from the local link
+(RFC 6762 section 11): on the same subnet as the interface
+`{IfaceIp, Netmask}`, or from an IPv4 link-local (169.254/16) address.
+A /32 netmask (point-to-point, and some cloud/VPN interfaces) says
+nothing about who's on the link, so every source is accepted then.
+""".
+-spec is_link_local(inet:ip_address(), inet:ip4_address(), inet:ip4_address()) -> boolean().
+is_link_local({169, 254, _, _}, _IfaceIp, _Netmask) ->
+    true;
+is_link_local({_, _, _, _} = SrcIp, IfaceIp, Netmask) ->
+    Netmask =:= {255, 255, 255, 255} orelse same_subnet(SrcIp, IfaceIp, Netmask);
+is_link_local(_NotIpv4, _IfaceIp, _Netmask) ->
+    false.
 
 resolve_ifname(IfName) ->
     case inet:getifaddrs() of
