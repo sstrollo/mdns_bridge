@@ -10,7 +10,8 @@ trace_test_() ->
         fun disable_stops_further_output/0,
         fun enable_again_with_a_different_device_moves_the_output/0,
         fun enabled_reports_current_state/0,
-        fun trace_macro_does_not_construct_info_when_disabled/0
+        fun trace_macro_does_not_construct_info_when_disabled/0,
+        fun other_tracing_on_the_node_is_left_alone/0
     ]}.
 
 start() ->
@@ -97,6 +98,40 @@ trace_macro_does_not_construct_info_when_disabled() ->
         after 1000 -> no_message
         end
     ).
+
+%% This app is embedded in other people's nodes. A process already being
+%% traced by some other tool (here: `send` tracing via the legacy
+%% erlang:trace/3 API, which is what dbg/recon/observer use) must keep
+%% that tracer and those flags across our enable/disable - an isolated
+%% trace session, not the node-global one.
+other_tracing_on_the_node_is_left_alone() ->
+    Victim = spawn(fun() ->
+        receive
+            stop -> ok
+        end
+    end),
+    OtherTracer = spawn(fun() ->
+        receive
+            stop -> ok
+        end
+    end),
+    1 = erlang:trace(Victim, true, [send, {tracer, OtherTracer}]),
+    Path = temp_path(),
+    {ok, F} = file:open(Path, [write]),
+    ok = mdns_trace:enable(F),
+    timer:sleep(20),
+    ?assertEqual({tracer, OtherTracer}, erlang:trace_info(Victim, tracer)),
+    ?assertEqual({flags, [send]}, erlang:trace_info(Victim, flags)),
+    %% ...while our own tracing still works alongside it.
+    ok = mdns_trace:event(alongside, #{}),
+    timer:sleep(20),
+    ok = mdns_trace:disable(),
+    ?assertEqual({tracer, OtherTracer}, erlang:trace_info(Victim, tracer)),
+    ?assertEqual({flags, [send]}, erlang:trace_info(Victim, flags)),
+    ok = file:close(F),
+    ?assert(string:find(read_and_delete(Path), "alongside") =/= nomatch),
+    Victim ! stop,
+    OtherTracer ! stop.
 
 enable_again_with_a_different_device_moves_the_output() ->
     Path1 = temp_path(),

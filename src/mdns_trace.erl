@@ -6,25 +6,31 @@ inserts/removals, and anywhere else that later calls `event/2`) that
 are too noisy to leave on at `debug` log level permanently, but are
 still worth being able to watch on demand.
 
-Built on Erlang's own call-tracing (`erlang:trace/3` +
-`erlang:trace_pattern/3`), not a log-level check: `event/2`'s body does
-nothing at all - whether a call to it produces any output is decided
-entirely by the BEAM's own trace machinery, at the VM level, not by a
-branch in this module. That means disabled tracing costs exactly one
-do-nothing function call at each instrumented site (the same call
-that would otherwise have gone to `logger:debug/2`, but without
-logger's own formatting/filtering machinery running first) - and
-enabling it doesn't need touching call sites, a config value, or an
-extra OTP application (deliberately not using `dbg`, which lives in
+Built on Erlang's own call-tracing, not a log-level check: `event/2`'s
+body does nothing at all - whether a call to it produces any output is
+decided entirely by the BEAM's own trace machinery, at the VM level,
+not by a branch in this module. That means disabled tracing costs
+exactly one do-nothing function call at each instrumented site (the
+same call that would otherwise have gone to `logger:debug/2`, but
+without logger's own formatting/filtering machinery running first) -
+and enabling it doesn't need touching call sites, a config value, or
+an extra OTP application (deliberately not using `dbg`, which lives in
 `runtime_tools` - not something an embedding release is guaranteed to
-include): `erlang:trace/3` and `erlang:trace_pattern/3` are plain
-BIFs.
+include).
+
+Tracing runs in its own isolated trace session (the OTP 27+ `trace`
+module, `trace:session_create/3`), never the node's legacy/default
+session: this app is embedded in other people's nodes, and anything
+else tracing there - `dbg`, `recon_trace`, observer, the embedding
+application's own tooling - must be neither clobbered by `enable/0,1`
+nor switched off by `disable/0`.
 """.
 
 -export([enable/0, enable/1, disable/0, enabled/0, event/2]).
 
 -define(SERVER, ?MODULE).
 -define(ENABLED_KEY, {?MODULE, enabled}).
+-define(SESSION_KEY, {?MODULE, session}).
 
 -doc """
 Call at each point that should be observable when tracing is
@@ -59,13 +65,16 @@ enable() ->
 Start tracing every call to `event/2`, from any process, printing each
 one to IoDevice. Safe to call again (with the same or a different
 IoDevice) while already enabled - always starts from a clean state.
+Other tracing on the node (by any other tool) is left untouched.
 """.
 -spec enable(io:device()) -> ok.
 enable(IoDevice) ->
     disable(),
     TracerPid = spawn(fun() -> tracer_init(IoDevice) end),
-    erlang:trace_pattern({?MODULE, event, 2}, true, []),
-    erlang:trace(all, true, [call, {tracer, TracerPid}]),
+    Session = trace:session_create(?MODULE, TracerPid, []),
+    _ = trace:function(Session, {?MODULE, event, 2}, true, []),
+    _ = trace:process(Session, all, true, [call]),
+    persistent_term:put(?SESSION_KEY, Session),
     persistent_term:put(?ENABLED_KEY, true),
     ok.
 
@@ -73,8 +82,15 @@ enable(IoDevice) ->
 -spec disable() -> ok.
 disable() ->
     persistent_term:erase(?ENABLED_KEY),
-    erlang:trace(all, false, [call]),
-    erlang:trace_pattern({?MODULE, event, 2}, false, []),
+    case persistent_term:get(?SESSION_KEY, undefined) of
+        undefined ->
+            ok;
+        Session ->
+            %% Destroying the session removes every trace flag and
+            %% pattern it set - and only those.
+            _ = trace:session_destroy(Session),
+            persistent_term:erase(?SESSION_KEY)
+    end,
     case whereis(?SERVER) of
         undefined ->
             ok;
