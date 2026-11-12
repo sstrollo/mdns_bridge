@@ -248,6 +248,15 @@ the registry, taking priority over anything merely overheard on the
 network for the same name (see
 [Security considerations](#security-considerations)).
 
+Stopping the application (`application:stop(mdns_bridge)`, `init:stop()`,
+a release shutdown) sends a goodbye for every registered name first, so
+nothing this node published lingers in other hosts' caches for its full
+TTL afterwards. Registrations are not persisted, though: if the
+`mdns_registry` process itself crashes (the supervisor restarts it),
+every registration is lost with it and owners are *not* notified - a
+`Ref` held across that is simply stale. An embedder that needs to
+survive it should monitor `mdns_registry` and re-register.
+
 By default, the address must be on the same subnet as the configured
 `interface` - a sanity check, since this app's own single interface is
 what it actually announces on. To publish an address that isn't (for

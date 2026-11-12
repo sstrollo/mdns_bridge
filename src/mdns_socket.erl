@@ -32,7 +32,8 @@ through the gen_server.
     send_probe/4,
     probe_subscribe/2,
     probe_unsubscribe/2,
-    refresh_interface/0
+    refresh_interface/0,
+    sync/0
 ]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
@@ -102,6 +103,16 @@ if it actually changed; a no-op otherwise.
 refresh_interface() ->
     gen_server:call(?SERVER, refresh_interface).
 
+-doc """
+Returns once every send requested before this call (`send_query/2`,
+`announce/3`, `send_probe/4` - all casts) has been handed to the
+socket. Used by `mdns_app:prep_stop/1` so shutdown goodbyes are
+actually on the wire before the socket is closed.
+""".
+-spec sync() -> ok.
+sync() ->
+    gen_server:call(?SERVER, sync).
+
 init([]) ->
     IfaceConfig = application:get_env(mdns_bridge, interface, undefined),
     case mdns_iface:resolve(IfaceConfig) of
@@ -167,6 +178,8 @@ handle_call({probe_subscribe, Name, Type}, {FromPid, _Tag}, State) ->
     {reply, ok, State#state{probe_watchers = Watchers}};
 handle_call({probe_unsubscribe, Name, Type}, {FromPid, _Tag}, State) ->
     {reply, ok, remove_watcher(Name, Type, FromPid, State)};
+handle_call(sync, _From, State) ->
+    {reply, ok, State};
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown_call}, State}.
 

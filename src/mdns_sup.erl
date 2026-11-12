@@ -13,18 +13,18 @@
 start_link() ->
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
-%% sup_flags() = #{strategy => strategy(),         % optional
-%%                 intensity => non_neg_integer(), % optional
-%%                 period => pos_integer()}        % optional
-%% child_spec() = #{id => child_id(),       % mandatory
-%%                  start => mfargs(),      % mandatory
-%%                  restart => restart(),   % optional
-%%                  shutdown => shutdown(), % optional
-%%                  type => worker(),       % optional
-%%                  modules => modules()}   % optional
+%% The children form a dependency chain, in this order: mdns_socket reads
+%% mdns_cache's and mdns_registry's ETS tables and calls mdns_cache for
+%% every packet it receives; mdns_query and mdns_dns_server depend on all
+%% three. An ETS table dies with its owner, so if mdns_cache or
+%% mdns_registry restarts, everything after it in the chain has to
+%% restart too rather than keep failing against a table that no longer
+%% exists - which is exactly what rest_for_one does. (A restart of a
+%% later child, e.g. mdns_socket, leaves the earlier ones - and every
+%% live registration - alone.)
 init([]) ->
     SupFlags = #{
-        strategy => one_for_one,
+        strategy => rest_for_one,
         intensity => 5,
         period => 10
     },
@@ -36,5 +36,3 @@ init([]) ->
         mdns_dns_server:child_spec()
     ],
     {ok, {SupFlags, ChildSpecs}}.
-
-%% internal functions

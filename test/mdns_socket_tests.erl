@@ -10,7 +10,8 @@ socket_test_() ->
             fun a_dead_probe_watcher_does_not_leak/0,
             fun non_latin1_name_does_not_crash_socket/0,
             fun malformed_inbound_packet_does_not_crash_socket/0,
-            fun our_own_goodbyes_are_not_conflicts/0
+            fun our_own_goodbyes_are_not_conflicts/0,
+            fun withdraw_all_goodbyes_reach_the_wire/0
         ]
     end}.
 
@@ -57,6 +58,51 @@ a_dead_probe_watcher_does_not_leak() ->
     exit(Pid, kill),
     timer:sleep(50),
     ?assertEqual(0, map_size(probe_watchers_in_state())).
+
+%% The shutdown path (mdns_app:prep_stop/1): withdraw_all/0 followed by
+%% sync/0 must have put a goodbye (TTL 0) for each registered record on
+%% the wire by the time sync/0 returns - observed here by a second
+%% member of the multicast group.
+withdraw_all_goodbyes_reach_the_wire() ->
+    Name = ~"goodbye-on-shutdown.local",
+    {ok, _Ref, Name} = mdns:register(Name, {10, 9, 9, 7}, #{probe => false, validate => false}),
+    Listener = open_group_listener(),
+    ok = mdns_registry:withdraw_all(),
+    ok = mdns_socket:sync(),
+    ?assert(saw_goodbye(Listener, binary_to_list(Name), 1000)),
+    gen_udp:close(Listener).
+
+open_group_listener() ->
+    {ok, {IfaceIp, _Netmask}} = mdns_iface:resolve_with_netmask(undefined),
+    {ok, S} = gen_udp:open(5353, [
+        binary,
+        {active, false},
+        {reuseaddr, true},
+        {ip, {0, 0, 0, 0}},
+        {add_membership, {{224, 0, 0, 251}, IfaceIp}}
+    ]),
+    S.
+
+saw_goodbye(S, Domain, TimeoutMs) ->
+    Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
+    saw_goodbye_until(S, Domain, Deadline).
+
+saw_goodbye_until(S, Domain, Deadline) ->
+    Left = Deadline - erlang:monotonic_time(millisecond),
+    case Left > 0 andalso gen_udp:recv(S, 0, Left) of
+        {ok, {_Ip, _Port, Packet}} ->
+            case inet_dns:decode(Packet, true) of
+                {ok, {dns_rec, _Header, _Qd, An, _Ns, _Ar}} ->
+                    case [D || {dns_rr, D, a, in, _, 0, _, _, _, _} <- An, D =:= Domain] of
+                        [] -> saw_goodbye_until(S, Domain, Deadline);
+                        [_ | _] -> true
+                    end;
+                _ ->
+                    saw_goodbye_until(S, Domain, Deadline)
+            end;
+        _ ->
+            false
+    end.
 
 %% #state.probe_watchers, read positionally since the record isn't
 %% shared via a header - sys:get_state/1 is a standard debug/testing

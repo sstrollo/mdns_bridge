@@ -28,6 +28,7 @@ registry_test_() ->
             fun accepts_auto_on_conflict_option/0,
             fun rejects_unknown_option_without_crashing/0,
             fun refresh_interface_leaves_registry_usable/0,
+            fun withdraw_all_withdraws_every_registration/0,
             fun ongoing_conflict_is_defended_once_then_given_up/0,
             fun ongoing_conflict_is_ignored_for_our_own_sibling_data/0,
             fun force_on_conflict_never_gives_up_ongoing_defense/0
@@ -474,6 +475,27 @@ refresh_interface_leaves_registry_usable() ->
     {ok, Ref, _} = mdns_registry:register("test-after-refresh.local", Ip, #{probe => false}),
     ?assertMatch([{Ip, _Ttl}], mdns_registry:answers_for(~"test-after-refresh.local", a)),
     ok = mdns_registry:unregister(Ref).
+
+%% What mdns_app:prep_stop/1 relies on: hosts and services alike, from
+%% any owner, all gone in one call - and the refs harmlessly stale.
+withdraw_all_withdraws_every_registration() ->
+    Opts = #{probe => false},
+    {ok, Ref1, _} = mdns_registry:register("withdraw-all-1.local", sibling_ip(33), Opts),
+    {ok, Ref2, _} = mdns_registry:register("withdraw-all-2.local", sibling_ip(34), Opts),
+    {ok, Ref3, SvcName} = mdns_registry:register_service(
+        "Withdraw All", "_wall._tcp", 80, [], service_local_target(30), Opts
+    ),
+    ok = mdns_registry:withdraw_all(),
+    ?assertEqual([], mdns_registry:answers_for(~"withdraw-all-1.local", a)),
+    ?assertEqual([], mdns_registry:answers_for(~"withdraw-all-2.local", a)),
+    ?assertEqual([], mdns_registry:answers_for(SvcName, srv)),
+    ?assertEqual([], mdns_registry:answers_for(~"_wall._tcp.local", ptr)),
+    ?assertEqual([], mdns_registry:answers_for(~"_services._dns-sd._udp.local", ptr)),
+    ?assertEqual(#{}, meta_ptr_refs_in_state()),
+    [ok = mdns_registry:unregister(Ref) || Ref <- [Ref1, Ref2, Ref3]],
+    %% ...and the registry is still usable afterwards.
+    {ok, Ref4, _} = mdns_registry:register("withdraw-all-after.local", sibling_ip(35), Opts),
+    ok = mdns_registry:unregister(Ref4).
 
 %% -- RFC 6762 section 9: ongoing conflict defense --------------------------
 %% mdns_registry:notify_conflict/3 is mdns_socket's real entry point for

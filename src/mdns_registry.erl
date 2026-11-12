@@ -75,6 +75,7 @@ accepted.
     register_service/5,
     register_service/6,
     unregister/1,
+    withdraw_all/0,
     answers_for/2,
     notify_conflict/3,
     refresh_interface/0
@@ -220,6 +221,18 @@ register_service(InstanceName, ServiceType, Port, TxtKVs, TargetHost, Opts) when
 unregister(Ref) ->
     gen_server:call(?SERVER, {unregister, Ref}).
 
+-doc """
+Withdraw every current registration at once, sending a goodbye for
+each record, exactly as if each owner had called `unregister/1` - no
+owner is notified. This is what `mdns_app:prep_stop/1` calls when the
+application is stopped, so nothing this node published outlives it in
+peers' caches. Every outstanding `Ref` is stale afterwards
+(`unregister/1` on one is a harmless no-op).
+""".
+-spec withdraw_all() -> ok.
+withdraw_all() ->
+    gen_server:call(?SERVER, withdraw_all).
+
 -doc "Current `{Data, Ttl}` answers for a published Name/Type - a direct table read.".
 -spec answers_for(binary(), atom()) -> [{term(), non_neg_integer()}].
 answers_for(Name, Type) ->
@@ -281,6 +294,9 @@ handle_call(
     {reply, {ok, Ref}, NewState};
 handle_call({unregister, Ref}, _From, State) ->
     {reply, ok, withdraw(Ref, State)};
+handle_call(withdraw_all, _From, State) ->
+    NewState = lists:foldl(fun withdraw/2, State, maps:keys(State#state.monitors)),
+    {reply, ok, NewState};
 handle_call(refresh_interface, _From, State) ->
     IfaceConfig = application:get_env(mdns_bridge, interface, undefined),
     case mdns_iface:resolve_with_netmask(IfaceConfig) of

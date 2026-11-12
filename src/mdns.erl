@@ -10,7 +10,14 @@ registered (RFC 6762 section 9) - see `register/3`'s `probe` and
 
 A registration is tied to the calling process - if it exits without
 unregistering, the name is automatically withdrawn (a goodbye packet
-is sent) so nothing outlives whatever wanted it published.
+is sent) so nothing outlives whatever wanted it published. Stopping
+the application likewise sends a goodbye for every registration first.
+
+Registrations are not persisted: if the `mdns_registry` process itself
+crashes (and is restarted by the supervisor), every registration is
+lost with it and owners are not notified - a `Ref` held across that is
+stale. An embedder that needs to survive it should monitor
+`mdns_registry` and re-register.
 """.
 
 -export([
