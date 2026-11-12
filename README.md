@@ -407,6 +407,8 @@ See `config/sys.config`:
   auto-detect. Multi-homed hosts should set this explicitly - mDNS is
   link-local per interface.
 - `dns_port` / `dns_bind_ip` - where the classic-DNS bridge listens.
+- `dns_domains` - domains the bridge answers for (default `["local"]`).
+  See [Bridging other domains](#bridging-other-domains).
 - `answer_ttl` - TTL cap applied to answers handed back over the bridge.
 - `query_timeout_ms` - how long to wait for an on-demand mDNS answer on a
   cache miss before replying NXDOMAIN.
@@ -425,6 +427,32 @@ See `config/sys.config`:
   network; oldest entries are evicted once over it.
 - `max_rename_attempts` - cap on retries for `on_conflict => auto` or
   `{rename, Fun}` before giving up with `{error, {name_conflict, _, _}}`.
+
+Bridging other domains
+----------------------
+
+The bridge doesn't have to answer `.local` itself. `dns_domains` takes
+a list of domains, e.g. `[~"home.arpa"]` (RFC 8375) or
+`[~"local", ~"home.arpa"]` for both:
+
+    $ dig @127.0.0.1 -p 8053 _ipp._tcp.home.arpa PTR
+    _ipp._tcp.home.arpa.  30  IN  PTR  office\032printer._ipp._tcp.home.arpa.
+    $ dig @127.0.0.1 -p 8053 office\ printer._ipp._tcp.home.arpa SRV
+    office\032printer._ipp._tcp.home.arpa. 30 IN SRV 0 0 631 printer.home.arpa.
+
+mDNS on the network is always `.local` - this only changes what the
+bridge answers. A question under a configured domain is resolved as
+the matching `.local` name, and `.local` names inside the answer (a
+PTR's target, a SRV's target host) are rewritten back into the domain
+that was asked about, so a client following them keeps asking the
+bridge. TXT data is passed through unchanged. An answer whose
+rewritten name would exceed DNS's 255-byte limit is left out.
+
+A query outside every configured domain gets the same empty NOERROR as
+any other name it has no opinion on - including `.local` itself when
+it isn't in the list. If two configured domains overlap
+(`arpa` and `home.arpa`), the longer one wins. Invalid entries stop
+the application from starting with `{invalid_dns_domains, Reason}`.
 
 Network interface changes
 --------------------------

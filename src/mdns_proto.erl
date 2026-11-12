@@ -25,6 +25,8 @@ back to this app's binary form.
     validate_name/1,
     validate_txt_data/1,
     is_local/1,
+    in_domain/2,
+    replace_domain/3,
     mdns_query/1,
     mdns_query/2,
     mdns_answer/3,
@@ -44,6 +46,7 @@ back to this app's binary form.
 ]).
 
 -define(CLASS_IN, in).
+-define(LOCAL_DOMAIN, ~"local").
 -define(LOCAL_SUFFIX, ~".local").
 
 %% A record as the response builders below take it.
@@ -145,12 +148,56 @@ validate_txt_data([]) -> ok.
 -doc "Whether Name (already `normalize_name/1`'d) is `.local` or exactly `local` itself.".
 -spec is_local(binary()) -> boolean().
 is_local(Name) ->
-    Name =:= ~"local" orelse ends_with(Name, ?LOCAL_SUFFIX).
+    in_domain(Name, ?LOCAL_DOMAIN).
 
-ends_with(Bin, Suffix) ->
-    SuffixSize = byte_size(Suffix),
-    byte_size(Bin) >= SuffixSize andalso
-        binary:part(Bin, byte_size(Bin) - SuffixSize, SuffixSize) =:= Suffix.
+-doc """
+Whether Name is Domain itself or a name under it (both already
+`normalize_name/1`'d). Matches on whole labels, in presentation
+format: `foo\.local` is a single label containing a literal dot, so it
+is not under `local`, and `notlocal` isn't either.
+""".
+-spec in_domain(binary(), binary()) -> boolean().
+in_domain(Domain, Domain) ->
+    true;
+in_domain(Name, Domain) ->
+    %% Position of the "." that would separate Name's own labels from
+    %% Domain; it must exist, have at least one byte before it, and not
+    %% be an escaped (literal) dot.
+    Dot = byte_size(Name) - byte_size(Domain) - 1,
+    Dot >= 1 andalso
+        binary:at(Name, Dot) =:= $. andalso
+        binary:part(Name, Dot + 1, byte_size(Domain)) =:= Domain andalso
+        not is_escaped(Name, Dot).
+
+%% A byte is escaped when an odd number of backslashes immediately
+%% precede it: each "\\" pair is one literal backslash.
+is_escaped(Name, Pos) ->
+    backslashes_before(Name, Pos, 0) rem 2 =:= 1.
+
+backslashes_before(Name, Pos, N) when Pos > 0 ->
+    case binary:at(Name, Pos - 1) of
+        $\\ -> backslashes_before(Name, Pos - 1, N + 1);
+        _ -> N
+    end;
+backslashes_before(_Name, 0, N) ->
+    N.
+
+-doc """
+Name with its trailing From domain replaced by To, e.g.
+`replace_domain(~"printer.home.arpa", ~"home.arpa", ~"local")` is
+`~"printer.local"`. Name must satisfy `in_domain(Name, From)`. The
+result may exceed DNS length limits when To is longer than From -
+check it with `validate_name/1` before putting it on the wire.
+""".
+-spec replace_domain(binary(), binary(), binary()) -> binary().
+replace_domain(Name, Same, Same) ->
+    Name;
+replace_domain(From, From, To) ->
+    To;
+replace_domain(Name, From, To) ->
+    %% Keeps the separating ".", so only To needs appending.
+    Prefix = binary:part(Name, 0, byte_size(Name) - byte_size(From)),
+    <<Prefix/binary, To/binary>>.
 
 -doc "Equivalent to `mdns_query([{Name, Type}])`.".
 -spec mdns_query(binary(), atom()) -> #dns_rec{}.

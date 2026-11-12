@@ -92,7 +92,12 @@ is_local_test_() ->
         ?_assert(mdns_proto:is_local(~"foo.local")),
         ?_assert(mdns_proto:is_local(~"local")),
         ?_assertNot(mdns_proto:is_local(~"example.com")),
-        ?_assertNot(mdns_proto:is_local(~"notlocal"))
+        ?_assertNot(mdns_proto:is_local(~"notlocal")),
+        %% A single label containing a literal (escaped) dot isn't under
+        %% `local`; an escaped backslash before a real dot doesn't count.
+        ?_assertNot(mdns_proto:is_local(~"foo\\.local")),
+        ?_assert(mdns_proto:is_local(~"foo\\\\.local")),
+        ?_assertNot(mdns_proto:is_local(~".local"))
     ].
 
 mdns_answer_test() ->
@@ -444,3 +449,25 @@ normalize_wire_name_test() ->
         <<"caf", 195, 169, ".local">>,
         mdns_proto:normalize_wire_name([$C, $a, $f, 195, 169, $., $l, $o, $c, $a, $l, $.])
     ).
+
+in_domain_test_() ->
+    [
+        ?_assert(mdns_proto:in_domain(~"home.arpa", ~"home.arpa")),
+        ?_assert(mdns_proto:in_domain(~"nas.home.arpa", ~"home.arpa")),
+        ?_assert(mdns_proto:in_domain(~"a.b.home.arpa", ~"home.arpa")),
+        ?_assertNot(mdns_proto:in_domain(~"nashome.arpa", ~"home.arpa")),
+        ?_assertNot(mdns_proto:in_domain(~"arpa", ~"home.arpa")),
+        ?_assertNot(mdns_proto:in_domain(~"nas\\.home.arpa", ~"home.arpa"))
+    ].
+
+replace_domain_test_() ->
+    [
+        ?_assertEqual(
+            ~"nas.local", mdns_proto:replace_domain(~"nas.home.arpa", ~"home.arpa", ~"local")
+        ),
+        ?_assertEqual(
+            ~"nas.home.arpa", mdns_proto:replace_domain(~"nas.local", ~"local", ~"home.arpa")
+        ),
+        ?_assertEqual(~"local", mdns_proto:replace_domain(~"home.arpa", ~"home.arpa", ~"local")),
+        ?_assertEqual(~"nas.local", mdns_proto:replace_domain(~"nas.local", ~"local", ~"local"))
+    ].
