@@ -248,7 +248,10 @@ init([]) ->
     IfaceConfig = application:get_env(mdns_bridge, interface, undefined),
     case mdns_iface:resolve_with_netmask(IfaceConfig) of
         {ok, {IfaceIp, Netmask}} ->
-            ets:new(?TAB, [set, public, named_table]),
+            %% ordered_set for the same reason as mdns_cache_tab: reads
+            %% match on a bound {Name, Type} prefix of the key, which is
+            %% a range scan here rather than a full-table scan.
+            ets:new(?TAB, [ordered_set, protected, named_table, {read_concurrency, true}]),
             schedule_reannounce_all(),
             {ok, #state{iface_ip = IfaceIp, netmask = Netmask}};
         {error, Reason} ->

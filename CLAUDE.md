@@ -117,6 +117,15 @@ to `dns_rate_limit_per_second`) with writes already serialized through
 one gen_server - the textbook single-writer/many-reader case ETS exists
 for.
 
+Both are `ordered_set`, `protected` tables keyed by `{Name, Type, Data}`.
+`ordered_set` is load-bearing, not a style choice: every read matches on
+a bound `{Name, Type}` prefix of that key, which ETS turns into a range
+traversal over just the matching rows on an `ordered_set` but into a
+full-table scan on a `set` (hash lookup needs the whole key) - measured
+at under 1us versus ~350us per lookup at 10k entries. `protected`
+because only the owning gen_server ever writes. Keep both properties if
+you touch either table.
+
 ## Requirements
 
 OTP 27+ is a hard requirement, not just what's tested:

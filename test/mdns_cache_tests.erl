@@ -6,6 +6,7 @@ cache_test_() ->
     {setup, fun start/0, fun stop/1, fun(_) ->
         [
             fun insert_and_lookup/0,
+            fun lookup_matches_only_the_exact_name_and_type/0,
             fun goodbye_removes_entry/0,
             fun near_expiry_reports_soon_to_expire/0,
             fun dump_reports_current_entries/0
@@ -68,6 +69,21 @@ insert_and_lookup() ->
     ok = mdns_cache:insert_many([{"a.local", a, {10, 0, 0, 1}, 120, false}]),
     [{{10, 0, 0, 1}, Ttl}] = mdns_cache:lookup("a.local", a),
     ?assert(Ttl =< 120 andalso Ttl > 0).
+
+%% The table is an ordered_set and lookups match on a key prefix, so
+%% names that sort next to each other (one a byte-prefix of the other)
+%% and other types under the same name must not bleed into a lookup.
+lookup_matches_only_the_exact_name_and_type() ->
+    ok = mdns_cache:insert_many([
+        {~"ab.local", a, {10, 0, 1, 1}, 120, false},
+        {~"ab.local", aaaa, {0, 0, 0, 0, 0, 0, 0, 1}, 120, false},
+        {~"ab.local.x", a, {10, 0, 1, 2}, 120, false},
+        {~"ab.loca", a, {10, 0, 1, 3}, 120, false},
+        {~"abc.local", a, {10, 0, 1, 4}, 120, false}
+    ]),
+    ?assertMatch([{{10, 0, 1, 1}, _}], mdns_cache:lookup(~"ab.local", a)),
+    ?assertMatch([{{10, 0, 1, 4}, _}], mdns_cache:lookup(~"abc.local", a)),
+    ?assertEqual([], mdns_cache:lookup(~"ab.loc", a)).
 
 goodbye_removes_entry() ->
     ok = mdns_cache:insert_many([{"b.local", a, {10, 0, 0, 2}, 120, false}]),
