@@ -9,7 +9,8 @@ socket_test_() ->
             fun probe_subscribe_and_unsubscribe_update_state/0,
             fun a_dead_probe_watcher_does_not_leak/0,
             fun non_latin1_name_does_not_crash_socket/0,
-            fun malformed_inbound_packet_does_not_crash_socket/0
+            fun malformed_inbound_packet_does_not_crash_socket/0,
+            fun our_own_goodbyes_are_not_conflicts/0
         ]
     end}.
 
@@ -91,3 +92,29 @@ malformed_inbound_packet_does_not_crash_socket() ->
     ?assertEqual(Pid, whereis(mdns_socket)),
     %% ...and it's still processing packets afterwards.
     ok = mdns_socket:refresh_interface().
+
+%% Two sibling registrations under one name (round-robin); the sibling
+%% is registered and withdrawn twice in quick succession. Each of its
+%% goodbyes loops back through this socket as an answer for the name
+%% with data that is no longer one of our registered values - which must
+%% not count as an ongoing conflict, or the second one (inside
+%% mdns_registry's defense grace window) would make it give up the
+%% registration that's still legitimately held.
+our_own_goodbyes_are_not_conflicts() ->
+    Name = "goodbye-sibling.local",
+    Opts = #{probe => false, validate => false},
+    {ok, Keeper, _} = mdns:register(Name, {10, 9, 9, 2}, Opts),
+    {ok, Sibling1, _} = mdns:register(Name, {10, 9, 9, 1}, Opts),
+    timer:sleep(100),
+    ok = mdns:unregister(Sibling1),
+    timer:sleep(100),
+    {ok, Sibling2, _} = mdns:register(Name, {10, 9, 9, 3}, Opts),
+    timer:sleep(100),
+    ok = mdns:unregister(Sibling2),
+    timer:sleep(200),
+    ?assertMatch([{{10, 9, 9, 2}, _}], mdns_registry:answers_for(~"goodbye-sibling.local", a)),
+    receive
+        {mdns_bridge_conflict, Keeper, _} = Msg -> error({spurious_conflict, Msg})
+    after 0 -> ok
+    end,
+    ok = mdns:unregister(Keeper).

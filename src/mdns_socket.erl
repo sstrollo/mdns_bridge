@@ -235,11 +235,21 @@ handle_packet(_SrcIp, _SrcPort, Packet, State) ->
 %% per-service-type enumeration PTR and the meta-enumeration PTR), where
 %% many different, simultaneously valid owners contributing different
 %% data under the same name is the normal case, not a conflict.
+%%
+%% A goodbye (TTL 0) is excluded too: it withdraws a claim rather than
+%% making one, so it can't conflict with ours. Not least our *own*
+%% goodbyes, which loop back here: once a sibling registration under a
+%% name we still hold has been withdrawn, its data is no longer among our
+%% current values, so its goodbye would otherwise read as a competing
+%% claim - and two of those within the defense grace window would make
+%% mdns_registry give up the surviving registration.
 check_conflicts(Entries) ->
     [maybe_notify_conflict(Entry) || Entry <- Entries],
     ok.
 
 maybe_notify_conflict({_Name, ptr, _Data, _Ttl, _CacheFlush}) ->
+    ok;
+maybe_notify_conflict({_Name, _Type, _Data, 0, _CacheFlush}) ->
     ok;
 maybe_notify_conflict({Name, Type, Data, _Ttl, _CacheFlush}) ->
     case mdns_registry:answers_for(Name, Type) of
