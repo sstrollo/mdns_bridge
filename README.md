@@ -387,6 +387,12 @@ legitimately coexist under the same name at once. For `on_conflict =>
 auto` or `{rename, Fun}`, `Fun` operates on the plain instance name/label
 (e.g. `"My Printer"`), not the full dotted DNS name.
 
+Registering the same instance name again - the normal way to change a
+service's TXT record or port - replaces the previous registration
+entirely (its old TXT/SRV rows are withdrawn with a goodbye where they
+differ, and silently where the new registration re-publishes the same
+record); it isn't treated as a conflict.
+
 `unregister/1` withdraws the SRV, TXT, and this instance's PTR together.
 The service-type-level meta-enumeration PTR is reference-counted across
 every live registration of that `ServiceType` from anywhere in the
